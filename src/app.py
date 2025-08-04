@@ -1,303 +1,703 @@
-import json
-import os
+# src/app.py - Google Sheets統合版
+
+"""
+PIP-Maker チャットボット Phase 1.5.1 - Google Sheets統合版
+リアルタイムスプレッドシート連携機能を追加
+"""
+
 import csv
-import difflib
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import logging
+import uuid
+import os
+import sys
+from difflib import SequenceMatcher
+from typing import Dict, List, Optional, Any
+from pathlib import Path
+from datetime import datetime
 
-# Attempt to import openai for embedding-based search. If not available or API key
-# missing, the application will gracefully fall back to a simple string similarity.
-# Load variables from a .env file if present. This allows users to place
-# `OPENAI_API_KEY` in a .env file without having to export it manually.
-def _load_env_file():
-    # Look for .env in the parent directory of this file and in the current
-    # working directory. The parent directory search allows placement of
-    # .env at the project root when running from drift_chat/.
-    candidates = [
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'),
-        os.path.join(os.getcwd(), '.env'),
-    ]
-    for env_path in candidates:
-        if os.path.exists(env_path):
-            try:
-                with open(env_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line or line.startswith('#') or '=' not in line:
-                            continue
-                        key, value = line.split('=', 1)
-                        key = key.strip()
-                        value = value.strip().strip('"').strip("'")
-                        # Do not override existing environment variables
-                        if key and key not in os.environ:
-                            os.environ[key] = value
-            except Exception:
-                pass
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
-_load_env_file()
 
-OPENAI_AVAILABLE = False
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+
+
+# 設定をインポート（プロジェクトルートから）
 try:
-    if OPENAI_API_KEY:
-        import openai  # type: ignore
-        openai.api_key = OPENAI_API_KEY
-        OPENAI_AVAILABLE = True
-except Exception:
-    # openai library not installed or API key invalid; fallback will be used
-    OPENAI_AVAILABLE = False
+    from config import get_settings, create_data_service
+    settings = get_settings()
+except ImportError:
+    # フォールバック設定
+    class FallbackSettings:
+        csv_file_path = "qa_data.csv"
+        app_name = "PIP‑Maker Chat API"
+        app_version = "1.5.1"
+        search_similarity_threshold = 0.1
+        slack_webhook_url = None
+        debug = False
+        google_sheets_enabled = False
+        is_google_sheets_configured = False
+        
+        def get_data_source_config(self):
+            return {'google_sheets_enabled': False, 'csv_fallback': self.csv_file_path}
+    
+    settings = FallbackSettings()
+    
+    def create_data_service():
+        """設定に基づいて適切なデータサービスを作成"""
+        from .google_sheets_service import GoogleSheetsService
+        from .enhanced_sheet_service import EnhancedGoogleSheetsService
+    
+        if settings.is_google_sheets_configured:
+            # Google Sheets統合サービスを使用
+            return GoogleSheetsService(
+                spreadsheet_id=settings.google_sheets_id,
+                credentials_path=settings.google_credentials_path,
+                fallback_csv_path=settings.csv_file_path
+            )
+        else:
+            # 従来のCSVサービスを使用
+            return EnhancedGoogleSheetsService(settings.csv_file_path)
 
+# サービスクラスをインポート（同一ディレクトリから）
+from .conversation_flow import ConversationFlowService, ConversationState, ConversationContext
 
-class DriftChatHandler(BaseHTTPRequestHandler):
-    """
-    A simple HTTP handler to serve a chat page and accept form submissions.
-    This handler supports serving static files (HTML, CSS, JS) from the
-    `static` and `templates` directories, and a POST endpoint `/submit`
-    to collect lead information from the chat widget. Collected leads are
-    appended to an in-memory list `stored_leads` for demonstration purposes.
-    """
+LOGGER = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-    # In-memory store for leads (in a real application, this would be a
-    # database or external service).
-    stored_leads = []
+# 例外クラス
+class ChatBotException(Exception):
+    """チャットボット基底例外クラス"""
 
-    def _set_headers(self, status_code=200, content_type="text/html; charset=utf-8"):
-        self.send_response(status_code)
-        self.send_header("Content-Type", content_type)
-        # Allow CORS for local development; in production restrict domains.
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
+class SearchException(ChatBotException):
+    """検索失敗時に発生する例外"""
 
-    def do_OPTIONS(self):
-        """Handle preflight CORS requests."""
-        self._set_headers()
+class DataSourceException(ChatBotException):
+    """データソース関連例外"""
 
-    def do_GET(self):
-        """Serve files from the templates and static directories."""
-        # Serve the main page at root.
-        if self.path == "/" or self.path == "/index.html":
-            return self._serve_file(os.path.join("templates", "index.html"), "text/html; charset=utf-8")
-        # Serve static assets (JS and CSS).
-        if self.path.startswith("/static/"):
-            # Remove the leading slash to get the relative path
-            rel_path = self.path.lstrip("/")
-            # Determine MIME type based on extension
-            _, ext = os.path.splitext(rel_path)
-            mime_types = {
-                ".js": "application/javascript; charset=utf-8",
-                ".css": "text/css; charset=utf-8",
-                ".png": "image/png",
-                ".jpg": "image/jpeg",
-                ".jpeg": "image/jpeg",
-                ".gif": "image/gif",
-            }
-            mime_type = mime_types.get(ext, "application/octet-stream")
-            return self._serve_file(rel_path, mime_type)
+# APIリクエスト/レスポンスモデル
+class CategorySelectionRequest(BaseModel):
+    conversation_id: str
+    category_id: str
 
-        # Anything else returns 404
-        self._set_headers(404)
-        self.wfile.write(b"Not Found")
+class FAQSelectionRequest(BaseModel):
+    conversation_id: str
+    faq_id: str
 
-    def _serve_file(self, rel_path, mime_type):
-        """Serve a file given its relative path and MIME type."""
+class InquirySubmissionRequest(BaseModel):
+    conversation_id: str
+    form_data: Dict[str, str]
+
+class SearchQuery(BaseModel):
+    question: str = Field(..., title="ユーザーの質問")
+    category: Optional[str] = Field(None, title="質問カテゴリ")
+    conversation_id: Optional[str] = Field(None, title="会話ID")
+
+class SearchResponse(BaseModel):
+    answer: str
+    confidence: float
+    source: Optional[str] = None
+    question: Optional[str] = None
+    response_type: str = "search"  # "search", "faq", "ai_generated"
+
+class FeedbackRequest(BaseModel):
+    conversation_id: str = Field(..., description="会話の一意識別子")
+    rating: str = Field(..., description="positive または negative")
+    comment: Optional[str] = Field(None, description="追加コメント")
+
+# サービスクラス
+class SlackNotificationService:
+    """Slack通知送信用のサービス"""
+
+    def __init__(self, webhook_url: Optional[str] = None) -> None:
+        self.webhook_url = webhook_url
+        self.enabled = bool(webhook_url)
+        
+        if self.enabled:
+            LOGGER.info(f"Slack通知サービス: 有効")
+        else:
+            LOGGER.info("Slack通知サービス: 無効 (Webhook URLが設定されていません)")
+
+    async def notify_chat_interaction(
+        self,
+        question: str,
+        answer: str,
+        confidence: float,
+        user_info: Optional[Dict[str, str]] = None,
+        interaction_type: str = "search"
+    ) -> None:
+        """チャット対話の通知"""
+        LOGGER.info(
+            "[Slack] %s: question=%s, answer=%.50s..., confidence=%.2f",
+            interaction_type,
+            question,
+            answer,
+            confidence
+        )
+
+    async def notify_faq_selection(
+        self, 
+        faq_id: str, 
+        question: str, 
+        category: str,
+        user_info: Optional[Dict[str, str]] = None
+    ) -> None:
+        """FAQ選択の通知"""
+        LOGGER.info(
+            "[Slack] FAQ選択: faq_id=%s, category=%s, question=%s",
+            faq_id, category, question
+        )
+
+    async def notify_inquiry_submission(self, inquiry_data: Dict[str, str]) -> None:
+        """お問い合わせ送信時の通知"""
+        company = inquiry_data.get('company', '')
+        name = inquiry_data.get('name', '')
+        email = inquiry_data.get('email', '')
+        inquiry = inquiry_data.get('inquiry', '')
+        
+        LOGGER.info(
+            "[Slack] 🔥 新しいお問い合わせ: %s (%s) - %s",
+            name, company, email
+        )
+        LOGGER.info("[Slack] 内容: %.100s...", inquiry)
+
+    async def notify_negative_feedback(self, feedback: Dict[str, str]) -> None:
+        """ネガティブフィードバックの通知"""
+        LOGGER.info("[Slack] ⚠️  ネガティブフィードバック: %s", feedback)
+
+    async def notify_data_source_change(self, source_type: str, status: str) -> None:
+        """データソース変更の通知"""
+        LOGGER.info(f"[Slack] 📊 データソース変更: {source_type} - {status}")
+
+class SearchService:
+    """Q&Aデータに対してファジー検索を実行するサービス"""
+
+    def __init__(self, data_service) -> None:
+        self.data_service = data_service
+        self.similarity_threshold = getattr(settings, 'search_similarity_threshold', 0.1)
+
+    @staticmethod
+    def _similarity(a: str, b: str) -> float:
+        """文字列の類似度を計算"""
+        return SequenceMatcher(None, a, b).ratio()
+
+    async def search(
+        self, 
+        query: str, 
+        category: Optional[str] = None,
+        exclude_faqs: bool = False
+    ) -> SearchResponse:
+        """検索を実行"""
         try:
-            with open(os.path.join(os.path.dirname(__file__), rel_path), "rb") as f:
-                content = f.read()
-            self._set_headers(200, mime_type)
-            self.wfile.write(content)
-        except FileNotFoundError:
-            self._set_headers(404)
-            self.wfile.write(b"Not Found")
+            data = await self.data_service.get_qa_data()
+        except Exception as e:
+            raise SearchException(f"データ取得エラー: {str(e)}")
+        
+        if not data:
+            raise SearchException("Q&Aデータが空です。")
 
-    def do_POST(self):
-        """Handle form submission from the chat widget."""
-        if self.path == "/submit":
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length).decode('utf-8')
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                self._set_headers(400, "application/json; charset=utf-8")
-                response = {"error": "Invalid JSON"}
-                self.wfile.write(json.dumps(response).encode('utf-8'))
-                return
-            # Validate and store data
-            required_fields = ["name", "email", "phone", "company", "message"]
-            missing = [field for field in required_fields if not data.get(field)]
-            if missing:
-                self._set_headers(400, "application/json; charset=utf-8")
-                response = {"error": f"Missing fields: {', '.join(missing)}"}
-                self.wfile.write(json.dumps(response).encode('utf-8'))
-                return
-            # Append to in-memory store
-            self.stored_leads.append(data)
-            # Respond with success
-            self._set_headers(200, "application/json; charset=utf-8")
-            response = {"message": "お問い合わせありがとうございます。担当者よりご連絡いたします。"}
-            self.wfile.write(json.dumps(response).encode('utf-8'))
-            return
-        elif self.path == "/search":
-            # Handle question search from chat widget
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length).decode('utf-8')
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                self._set_headers(400, "application/json; charset=utf-8")
-                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
-                return
-            # Extract question and optional category
-            question = data.get('question', '').strip()
-            category = data.get('category', None)
-            if not question:
-                self._set_headers(400, "application/json; charset=utf-8")
-                self.wfile.write(json.dumps({"error": "Missing 'question'"}).encode('utf-8'))
-                return
-            # Find best answer
-            answer, found = find_best_answer(question, category)
-            self._set_headers(200, "application/json; charset=utf-8")
-            self.wfile.write(json.dumps({"answer": answer, "found": found}).encode('utf-8'))
-            return
-        # Unknown POST path
-        self._set_headers(404)
-        self.wfile.write(b"Not Found")
-
-
-# Load Q&A data from CSV once at module import time
-QA_DATA: list[dict] = []
-QA_FILE = os.path.join(os.path.dirname(__file__), 'qa_data.csv')
-if os.path.exists(QA_FILE):
-    try:
-        with open(QA_FILE, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                QA_DATA.append({
-                    'question': row.get('質問', '').strip(),
-                    'answer': row.get('回答', '').strip(),
-                    'category': row.get('対応カテゴリー', '').strip(),
-                    'source': row.get('根拠資料', '').strip(),
-                    # Placeholder for embedding vector; will be populated if OpenAI available
-                    'embedding': None,
-                })
-    except Exception as e:
-        print(f"Error loading QA data: {e}")
-
-# Precompute embeddings for questions if OpenAI is available
-if OPENAI_AVAILABLE and QA_DATA:
-    try:
-        # Gather all question texts
-        texts = [entry['question'] for entry in QA_DATA]
-        # Call OpenAI embeddings API in one batch to minimize requests
-        response = openai.Embedding.create(model="text-embedding-ada-002", input=texts)  # type: ignore
-        # Map returned embeddings back to QA_DATA entries
-        for i, data in enumerate(response['data']):  # type: ignore
-            QA_DATA[i]['embedding'] = data['embedding']
-    except Exception as e:
-        print(f"Error computing embeddings: {e}")
-        OPENAI_AVAILABLE = False
-
-
-def find_best_answer(user_question: str, selected_category: str | None = None, threshold: float = 0.35):
-    """
-    Find the most relevant answer for the user's question. The search uses two
-    strategies:
-
-    1. If OpenAI embeddings are available and embeddings for QA entries have
-       been precomputed, compute an embedding for the user's question and
-       measure cosine similarity to each QA entry's embedding. If the highest
-       similarity exceeds the threshold, return that answer.
-    2. Otherwise, or if no high similarity is found, fall back to a simple
-       string similarity (difflib.SequenceMatcher) to find the closest match.
-
-    If `selected_category` is provided, candidate entries are first filtered
-    to those whose category contains the selected category. If no confident
-    match is found among the filtered entries, the search is repeated across
-    all entries.
-    Returns (answer, found) where `found` indicates whether a confident match
-    was found.
-    """
-
-    def cosine_similarity(vec1, vec2):
-        # Compute cosine similarity between two numeric vectors
-        dot = sum(a * b for a, b in zip(vec1, vec2))
-        norm1 = sum(a * a for a in vec1) ** 0.5
-        norm2 = sum(b * b for b in vec2) ** 0.5
-        return dot / (norm1 * norm2) if norm1 and norm2 else 0.0
-
-    def embedding_search(candidates):
-        # Compute embedding for user's question
-        try:
-            result = openai.Embedding.create(model="text-embedding-ada-002", input=[user_question])  # type: ignore
-            question_embedding = result['data'][0]['embedding']  # type: ignore
-        except Exception:
-            return None, 0.0
+        query_norm = query.strip().lower()
+        best_match = None
         best_score = 0.0
-        best_answer = None
-        for entry in candidates:
-            if not entry.get('embedding'):
+        
+        for row in data:
+            # カテゴリーフィルター
+            if category and row.get('category'):
+                if row['category'].lower() != category.lower():
+                    continue
+            
+            # FAQを除外する場合
+            if exclude_faqs and row.get('notes') == 'よくある質問':
                 continue
-            score = cosine_similarity(question_embedding, entry['embedding'])
+                
+            question = row.get('question', '')
+            if not question:
+                continue
+                
+            score = self._similarity(query_norm, question.lower())
             if score > best_score:
+                best_match = row
                 best_score = score
-                best_answer = entry['answer']
-        return best_answer, best_score
 
-    def simple_search(candidates):
-        # Use difflib to find similar question text
-        best_score = 0.0
-        best_answer = None
-        for entry in candidates:
-            sim = difflib.SequenceMatcher(None, user_question, entry['question']).ratio()
-            if sim > best_score:
-                best_score = sim
-                best_answer = entry['answer']
-        return best_answer, best_score
+        if not best_match or best_score < self.similarity_threshold:
+            raise SearchException("該当する回答が見つかりませんでした。より具体的なキーワードでお試しください。")
 
-    # Filter by category if provided
-    if selected_category:
-        filtered = [e for e in QA_DATA if selected_category in e['category']]
-    else:
-        filtered = list(QA_DATA)
+        answer = best_match.get('answer', '')
+        if not answer:
+            answer = "申し訳ございませんが、この質問に対する回答が登録されていません。お問い合わせフォームからご連絡ください。"
+        
+        return SearchResponse(
+            answer=answer,
+            confidence=round(float(best_score), 2),
+            source=best_match.get('source'),
+            question=best_match.get('question'),
+            response_type="search"
+        )
 
-    # Use embedding search if available
-    if OPENAI_AVAILABLE and QA_DATA:
-        answer, score = embedding_search(filtered if filtered else QA_DATA)
-        # If answer found and above threshold, return
-        # For embeddings, use a higher threshold (e.g. 0.8) because similarity is between 0 and 1
-        if answer and score >= max(0.8, threshold):
-            return answer, True
-    # Fallback to simple string similarity search
-    answer_simple, score_simple = simple_search(filtered if filtered else QA_DATA)
-    if answer_simple and score_simple >= threshold:
-        return answer_simple, True
-    # If no match above threshold and category was applied, search across all
-    if selected_category and filtered and len(filtered) != len(QA_DATA):
-        # Attempt embedding search across all
-        if OPENAI_AVAILABLE and QA_DATA:
-            ans_all, score_all = embedding_search(QA_DATA)
-            if ans_all and score_all >= max(0.8, threshold):
-                return ans_all, True
-        # Otherwise simple search across all
-        ans_all_simple, score_all_simple = simple_search(QA_DATA)
-        if ans_all_simple and score_all_simple >= threshold:
-            return ans_all_simple, True
-    # No confident match found
-    return None, False
+class FeedbackService:
+    """ユーザーフィードバックを記録するサービス"""
 
+    def __init__(self, slack_service: SlackNotificationService) -> None:
+        self.slack_service = slack_service
 
+    async def record_feedback(
+        self, 
+        conversation_id: str, 
+        rating: str, 
+        comment: Optional[str],
+        context: Optional[Dict] = None
+    ) -> None:
+        """フィードバックを記録"""
+        feedback = {
+            "conversation_id": conversation_id,
+            "rating": rating,
+            "comment": comment,
+            "timestamp": datetime.now().isoformat(),
+            "context": context
+        }
+        
+        LOGGER.info("フィードバックを記録: %s", feedback)
+        
+        # ネガティブフィードバックの場合はSlackに通知
+        if rating == "negative":
+            await self.slack_service.notify_negative_feedback(feedback)
 
-def run(server_class=HTTPServer, handler_class=DriftChatHandler, port=8000):
-    """Run the HTTP server."""
-    server_address = ('', port)
-    httpd = server_class(server_address, handler_class)
-    print(f"Server started at http://localhost:{port}")
+# サービスの初期化
+try:
+    # データサービスを設定に基づいて作成
+    data_service = create_data_service()
+    LOGGER.info(f"データサービス初期化完了: {type(data_service).__name__}")
+    
+    # データソース設定の表示
+    data_config = settings.get_data_source_config()
+    LOGGER.info(f"データソース設定: {data_config}")
+    
+except Exception as e:
+    LOGGER.error(f"データサービス初期化エラー: {e}")
+    # フォールバック
+    from enhanced_sheet_service import EnhancedGoogleSheetsService
+    data_service = EnhancedGoogleSheetsService(getattr(settings, 'csv_file_path', 'qa_data.csv'))
+
+conversation_flow_service = ConversationFlowService(data_service)
+search_service = SearchService(data_service)
+
+# Slack通知サービスの初期化
+slack_webhook_url = getattr(settings, 'slack_webhook_url', None)
+slack_service = SlackNotificationService(webhook_url=slack_webhook_url)
+feedback_service = FeedbackService(slack_service)
+
+# FastAPIアプリケーションの初期化
+app_name = getattr(settings, 'app_name', 'PIP‑Maker Chat API')
+app_version = getattr(settings, 'app_version', '1.5.1')  # Google Sheets対応版
+app = FastAPI(
+    title=f"{app_name} (Google Sheets対応)", 
+    version=app_version,
+    description="Google Sheetsリアルタイム連携機能を搭載"
+)
+
+# 例外ハンドラー
+@app.exception_handler(ChatBotException)
+async def chatbot_exception_handler(request: Request, exc: ChatBotException) -> JSONResponse:
+    """ChatBotExceptionとそのサブクラス用の統一エラーレスポンス"""
+    error_id = uuid.uuid4().hex
+    LOGGER.error("%s: %s [error_id=%s]", exc.__class__.__name__, exc, error_id)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "システムエラーが発生しました。",
+            "fallback_message": "申し訳ございません。担当者までお問い合わせください。",
+            "error_id": error_id,
+        },
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """pydanticバリデーションエラーを適切に処理"""
+    return JSONResponse(
+        status_code=422,
+        content={"error": "入力内容が正しくありません。", "details": exc.errors()},
+    )
+
+# 既存エンドポイント
+@app.get("/", response_class=HTMLResponse)
+async def index() -> HTMLResponse:
+    """フロントエンドHTMLページを配信"""
+    html_path = os.path.join(os.path.dirname(__file__), "..", "index.html")
     try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    httpd.server_close()
+        with open(html_path, encoding="utf-8") as fp:
+            html = fp.read()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="index.html not found")
+    return HTMLResponse(content=html)
 
+@app.get("/health")
+async def health() -> Dict[str, str]:
+    """ヘルスチェックエンドポイント"""
+    return {
+        "status": "ok", 
+        "version": app_version,
+        "phase": "1.5.1",
+        "features": "conversation_flow,faq_system,inquiry_form,google_sheets",
+        "data_source": "google_sheets" if getattr(settings, 'is_google_sheets_configured', False) else "csv"
+    }
 
-if __name__ == '__main__':
-    run()
+@app.post("/api/search", response_model=SearchResponse)
+async def search_endpoint(query: SearchQuery) -> SearchResponse:
+    """検索エンドポイント（Google Sheets対応）"""
+    try:
+        result = await search_service.search(
+            query.question, 
+            query.category,
+            exclude_faqs=False
+        )
+    except SearchException as exc:
+        raise ChatBotException(str(exc)) from exc
+    
+    # Slack通知
+    await slack_service.notify_chat_interaction(
+        question=query.question,
+        answer=result.answer,
+        confidence=result.confidence,
+        interaction_type="search"
+    )
+    
+    return result
+
+@app.post("/api/feedback")
+async def feedback_endpoint(feedback: FeedbackRequest) -> Dict[str, str]:
+    """フィードバック記録エンドポイント"""
+    if feedback.rating not in ["positive", "negative"]:
+        raise HTTPException(
+            status_code=422, 
+            detail="ratingは 'positive' または 'negative' である必要があります"
+        )
+    
+    # 会話コンテキストを取得
+    context = conversation_flow_service.get_conversation_context(feedback.conversation_id)
+    context_data = None
+    if context:
+        context_data = {
+            "state": context.state,
+            "category": context.selected_category,
+            "interaction_count": context.interaction_count
+        }
+    
+    await feedback_service.record_feedback(
+        conversation_id=feedback.conversation_id,
+        rating=feedback.rating,
+        comment=feedback.comment,
+        context=context_data
+    )
+    
+    return {"status": "received"}
+
+# 対話フロー用エンドポイント
+@app.get("/api/conversation/welcome")
+async def get_welcome_message() -> Dict[str, Any]:
+    """初期の歓迎メッセージとカテゴリー選択肢を返す"""
+    try:
+        return await conversation_flow_service.get_welcome_message()
+    except Exception as e:
+        LOGGER.error(f"Welcome message error: {e}")
+        raise ChatBotException("歓迎メッセージの取得に失敗しました")
+
+@app.post("/api/conversation/category")
+async def select_category_endpoint(request: CategorySelectionRequest) -> Dict[str, Any]:
+    """カテゴリー選択処理"""
+    try:
+        return await conversation_flow_service.select_category(
+            request.conversation_id, 
+            request.category_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        LOGGER.error(f"Category selection error: {exc}")
+        raise ChatBotException("カテゴリー選択処理でエラーが発生しました")
+
+@app.post("/api/conversation/faq")
+async def select_faq_endpoint(request: FAQSelectionRequest) -> Dict[str, Any]:
+    """FAQ選択処理"""
+    try:
+        result = await conversation_flow_service.select_faq(
+            request.conversation_id,
+            request.faq_id
+        )
+        
+        # Slack通知
+        context = conversation_flow_service.get_conversation_context(request.conversation_id)
+        category = context.selected_category if context else "unknown"
+        
+        await slack_service.notify_faq_selection(
+            faq_id=request.faq_id,
+            question=result.get("message", "")[:100],
+            category=category
+        )
+        
+        return result
+        
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        LOGGER.error(f"FAQ selection error: {exc}")
+        raise ChatBotException("FAQ選択処理でエラーが発生しました")
+
+@app.post("/api/conversation/inquiry")
+async def submit_inquiry_endpoint(request: InquirySubmissionRequest) -> Dict[str, Any]:
+    """お問い合わせ送信処理"""
+    try:
+        result = await conversation_flow_service.submit_inquiry(
+            request.conversation_id,
+            request.form_data
+        )
+        
+        # Slack通知
+        await slack_service.notify_inquiry_submission(request.form_data)
+        
+        return result
+        
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        LOGGER.error(f"Inquiry submission error: {exc}")
+        raise ChatBotException("お問い合わせ送信処理でエラーが発生しました")
+
+# Google Sheets統合用の新しいエンドポイント
+@app.get("/api/data-source/status")
+async def get_data_source_status() -> Dict[str, Any]:
+    """データソースの状態を取得"""
+    try:
+        if hasattr(data_service, 'get_connection_status'):
+            connection_status = data_service.get_connection_status()
+        else:
+            connection_status = {"type": "csv", "status": "active"}
+        
+        cache_info = data_service.get_cache_info() if hasattr(data_service, 'get_cache_info') else {}
+        
+        return {
+            "connection": connection_status,
+            "cache": cache_info,
+            "configuration": settings.get_data_source_config(),
+            "last_updated": datetime.now().isoformat()
+        }
+    except Exception as e:
+        LOGGER.error(f"Data source status error: {e}")
+        return {"error": str(e)}
+
+@app.post("/api/data-source/refresh")
+async def refresh_data_source() -> Dict[str, Any]:
+    """データソースを強制リフレッシュ"""
+    try:
+        if hasattr(data_service, 'refresh_data'):
+            success = await data_service.refresh_data()
+            message = "データを正常にリフレッシュしました" if success else "データリフレッシュに失敗しました"
+        else:
+            data_service.clear_cache()
+            success = True
+            message = "キャッシュをクリアしました"
+        
+        if success:
+            await slack_service.notify_data_source_change("manual_refresh", "success")
+        
+        return {
+            "success": success,
+            "message": message,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        LOGGER.error(f"Data refresh error: {e}")
+        await slack_service.notify_data_source_change("manual_refresh", f"error: {str(e)}")
+        return {"success": False, "message": str(e)}
+
+# 管理・デバッグ用エンドポイント
+@app.get("/api/admin/categories")
+async def get_categories_info() -> Dict[str, Any]:
+    """カテゴリー情報と統計を取得"""
+    try:
+        flow_summary = await conversation_flow_service.get_category_summary()
+        
+        if hasattr(data_service, 'get_categories_summary'):
+            sheet_summary = await data_service.get_categories_summary()
+        else:
+            sheet_summary = {}
+        
+        cache_info = data_service.get_cache_info() if hasattr(data_service, 'get_cache_info') else {}
+        
+        return {
+            "categories": flow_summary,
+            "statistics": sheet_summary,
+            "cache_info": cache_info,
+            "data_source": type(data_service).__name__
+        }
+    except Exception as e:
+        LOGGER.error(f"Categories info error: {e}")
+        raise ChatBotException("カテゴリー情報の取得に失敗しました")
+
+@app.post("/api/admin/cache/clear")
+async def clear_cache() -> Dict[str, str]:
+    """キャッシュをクリア"""
+    try:
+        data_service.clear_cache()
+        return {"status": "success", "message": "キャッシュをクリアしました"}
+    except Exception as e:
+        LOGGER.error(f"Cache clear error: {e}")
+        return {"status": "error", "message": str(e)}
+
+# テスト用エンドポイント
+@app.get("/test-google-sheets")
+async def test_google_sheets() -> Dict[str, Any]:
+    """Google Sheets接続テスト"""
+    try:
+        if not hasattr(data_service, 'get_connection_status'):
+            return {
+                "status": "info",
+                "message": "CSVモードで動作中。Google Sheets機能は無効です。"
+            }
+        
+        connection_status = data_service.get_connection_status()
+        
+        if connection_status.get('service_initialized'):
+            # 実際にデータ取得をテスト
+            data = await data_service.get_qa_data()
+            return {
+                "status": "success",
+                "message": f"Google Sheets接続成功！{len(data)}件のデータを取得",
+                "connection_details": connection_status,
+                "sample_data": data[0] if data else None
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Google Sheets接続が初期化されていません",
+                "connection_details": connection_status
+            }
+            
+    except Exception as e:
+        LOGGER.error(f"Google Sheets test error: {e}")
+        return {
+            "status": "error", 
+            "message": f"Google Sheetsテストでエラー: {str(e)}"
+        }
+
+@app.get("/test-slack")
+async def test_slack_connection() -> Dict[str, Any]:
+    """Slack接続テスト"""
+    try:
+        webhook_url = getattr(settings, 'slack_webhook_url', None)
+        
+        if not webhook_url:
+            return {
+                "status": "error", 
+                "message": "SLACK_WEBHOOK_URLが設定されていません。"
+            }
+        
+        # テスト通知を送信
+        await slack_service.notify_chat_interaction(
+            question="🧪 Google Sheets統合テスト",
+            answer="Google Sheets統合機能が正常に動作しています。",
+            confidence=1.0,
+            interaction_type="sheets_integration_test"
+        )
+        
+        return {
+            "status": "success", 
+            "message": "Google Sheets統合版 Slack通知テストを送信しました",
+            "phase": "1.5.1",
+            "features": ["conversation_flow", "faq_system", "inquiry_form", "google_sheets"]
+        }
+        
+    except Exception as e:
+        LOGGER.error(f"test-slack エラー: {str(e)}")
+        return {"status": "error", "message": f"エラーが発生しました: {str(e)}"}
+
+@app.get("/slack-status")
+async def slack_status() -> Dict[str, Any]:
+    """Slack設定状況確認"""
+    webhook_url = getattr(settings, 'slack_webhook_url', None)
+    service_enabled = getattr(slack_service, 'enabled', False)
+    
+    return {
+        "phase": "1.5.1",
+        "webhook_configured": bool(webhook_url),
+        "service_enabled": service_enabled,
+        "features": ["conversation_flow", "faq_system", "inquiry_form", "google_sheets"],
+        "google_sheets_enabled": getattr(settings, 'is_google_sheets_configured', False),
+        "debug_mode": getattr(settings, 'debug', False)
+    }
+
+# 静的ファイル配信
+
+static_path = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(static_path):
+    app.mount("/static", StaticFiles(directory=static_path), name="static")
+else:
+    LOGGER.warning(f"静的ファイルディレクトリが見つかりません: {static_path}")
+
+project_root = Path(__file__).parent.parent
+static_paths_to_try = [
+    Path(__file__).parent / "static",  # src/static
+    project_root / "static",           # project_root/static
+    project_root / "src" / "static",   # project_root/src/static
+]
+
+static_mounted = False
+for static_path in static_paths_to_try:
+    if static_path.exists():
+        app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
+        LOGGER.info(f"✅ Static files mounted from: {static_path}")
+        static_mounted = True
+        break
+
+if not static_mounted:
+    LOGGER.warning("⚠️ 静的ファイルディレクトリが見つかりません")
+    LOGGER.info("以下のパスを確認してください:")
+    for path in static_paths_to_try:
+        LOGGER.info(f"  - {path} (exists: {path.exists()})")
+
+# アプリケーション起動時の初期化
+@app.on_event("startup")
+async def startup_event():
+    """アプリケーション起動時の初期化処理"""
+    LOGGER.info("=== PIP-Maker Chatbot Phase 1.5.1 起動（Google Sheets統合版）===")
+    
+    # データソース情報表示
+    data_config = settings.get_data_source_config()
+    if data_config['google_sheets_enabled']:
+        LOGGER.info("📊 Google Sheetsモードで動作")
+        LOGGER.info(f"スプレッドシートID: {data_config['sheets_config']['id'][:10]}...")
+    else:
+        LOGGER.info("📄 CSVモードで動作")
+        LOGGER.info(f"CSV パス: {data_config['csv_fallback']}")
+    
+    LOGGER.info(f"Slack 通知: {'有効' if slack_service.enabled else '無効'}")
+    
+    try:
+        # データの事前読み込み
+        data = await data_service.get_qa_data()
+        LOGGER.info(f"Q&Aデータ: {len(data)}件を読み込み完了")
+        
+        # カテゴリー統計を表示
+        summary = await conversation_flow_service.get_category_summary()
+        for cat_id, info in summary.items():
+            LOGGER.info(f"  {info['emoji']} {info['name']}: FAQ {info['faq_count']}件")
+        
+        # Google Sheets接続状況表示
+        if hasattr(data_service, 'get_connection_status'):
+            connection_status = data_service.get_connection_status()
+            LOGGER.info(f"Google Sheets接続状況: {connection_status}")
+            
+    except Exception as e:
+        LOGGER.error(f"起動時初期化エラー: {e}")
+        
+        # フォールバック通知
+        if hasattr(data_service, 'get_connection_status'):
+            await slack_service.notify_data_source_change("startup", f"fallback_to_csv: {str(e)}")
+
+# デバッグ情報出力
+if getattr(settings, 'debug', False):
+    LOGGER.info("=== デバッグモード（Google Sheets統合版）===")
+    LOGGER.info(f"データサービス: {type(data_service).__name__}")
+    if hasattr(settings, 'debug_settings'):
+        settings.debug_settings()

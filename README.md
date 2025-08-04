@@ -1,135 +1,193 @@
-# Drift風チャットボット - SaaS製品問い合わせシステム
+# PIP-Maker チャットボット
 
-動画作成ソフト「PIP-Maker」のプロダクトサイトに埋め込み可能な、インタラクティブなチャットボットシステムです。サイト訪問者を自然な会話で問い合わせまで誘導し、コンバージョン率の向上を目指します。
+PIP-Makerの問い合わせ対応を自動化する高度なチャットボットシステムです。
 
-## 概要
+## 🌟 主な機能
 
-このチャットボットは、Drift風のモダンなUIで訪問者との対話を行い、段階的に情報提供から問い合わせフォームへと誘導します。AIキャラクターを用いた動画作成ツール「PIP-Maker」に特化した知識ベースを持ち、よくある質問に自動回答することで、リード獲得を効率化します。
+- **高精度検索**: ファジーマッチングによる柔軟な質問回答
+- **リアルタイム通知**: Slack連携による問い合わせ監視
+- **フィードバック機能**: ユーザー満足度の収集・分析
+- **統一エラーハンドリング**: 適切なエラーメッセージとログ管理
+- **レスポンシブUI**: モバイル対応のモダンなインターフェース
 
-## 主な機能
+## 🚀 クイックスタート
 
-### 1. インタラクティブな会話フロー
-- **初期選択肢**: サービス内容、料金、機能比較、その他の4つのカテゴリから選択
-- **段階的誘導**: 選択した内容に応じた適切な情報提供
-- **質問応答**: ユーザーの自由な質問に対するAI検索機能
-- **フォーム誘導**: 自然な流れで問い合わせフォームへ誘導
+### 前提条件
 
-### 2. 高度な検索・回答システム
-- **OpenAI Embeddings**: セマンティック検索による高精度な回答（OpenAI APIキー設定時）
-- **フォールバック検索**: 文字列類似度によるバックアップ検索機能
-- **カテゴリフィルタ**: 選択されたトピックに応じた回答の絞り込み
-- **多層検索**: カテゴリ内で見つからない場合は全体検索に拡張
+- Python 3.11以上
+- pip
 
-### 3. 知識ベース管理
-- **CSV形式**: 質問、回答、カテゴリ、根拠資料を構造化して管理
-- **54件のQ&A**: PIP-Makerに関する包括的な質問・回答データベース
-- **動的読み込み**: サーバー起動時に自動でデータを読み込み、埋め込みベクトルを生成
+### インストール
 
-### 4. リード管理システム
-- **問い合わせフォーム**: 名前、メール、電話番号、会社名、問い合わせ内容を収集
-- **バリデーション**: クライアント・サーバー両側でのデータ検証
-- **データ保存**: インメモリストレージ（本番環境では外部DBに接続可能）
+1. **リポジトリのクローン**
+```bash
+git clone <repository-url>
+cd pip-maker-chatbot
+```
 
-## 技術仕様
+2. **仮想環境の作成**
+```bash
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+```
 
-### バックエンド
-- **Python 3.x** + 標準ライブラリ（http.server）
-- **OpenAI API**: テキスト埋め込み生成（text-embedding-ada-002）
-- **CSV処理**: 知識ベースの読み込み・管理
-- **CORS対応**: フロントエンドとの連携
+3. **依存関係のインストール**
+```bash
+pip install -r requirements.txt
+```
 
-### フロントエンド
-- **Vanilla JavaScript**: 依存関係なしの軽量実装
-- **レスポンシブデザイン**: モバイル・デスクトップ対応
-- **リアルタイム通信**: Fetch APIによるJSON通信
-- **UX最適化**: Drift風のモダンなチャットUI
+4. **環境変数の設定**
+```bash
+cp .env.example .env
+# .envファイルを編集して必要な設定を行う
+```
 
-### ファイル構成
+5. **アプリケーションの起動**
+```bash
+uvicorn src.app:app --reload
+```
+
+6. **ブラウザでアクセス**
+```
+http://localhost:8000
+```
+
+## 🔧 開発環境
+
+### 開発用依存関係のインストール
+```bash
+pip install -r requirements-dev.txt
+```
+
+### テストの実行
+```bash
+pytest tests/
+```
+
+### コードフォーマット
+```bash
+black .
+flake8 .
+mypy .
+```
+
+### Dockerを使用した起動
+```bash
+docker-compose up --build
+```
+
+## 📁 プロジェクト構造
+
 ```
 ├── src/
-│    ├── app.py              # メインサーバーアプリケーション
-│    ├── qa_data.csv         # 質問・回答データベース（54件）
-│    ├── server.log          # サーバーログファイル
-│    ├── templates/
-│    │    └── index.html     # メインHTMLページ
-│    └── static/
-│         ├── script.js      # フロントエンドロジック
-│         └── style.css      # UIスタイリング
-├── requirements.txt         # Python依存関係
-├── .gitignore              # Git除外設定
-└── .env                    # 環境変数（OpenAI APIキーなど）
+│   ├── static/
+│   │   ├── script.js      # フロントエンドJavaScript
+│   │   └── style.css      # スタイルシート
+│   ├── app.py             # メインアプリケーション
+│   └── qa_data.csv        # Q&Aデータ
+├── tests/
+│   └── test_app.py        # テストケース
+├── config.py              # 設定管理
+├── index.html             # フロントエンドHTML
+├── requirements.txt       # 本番用依存関係
+├── requirements-dev.txt   # 開発用依存関係
+├── Dockerfile             # Docker設定
+├── docker-compose.yml     # Docker Compose設定
+└── .env.example           # 環境変数テンプレート
 ```
 
-## セットアップ・使用方法
+## 🔌 API エンドポイント
 
-### 1. 環境構築
-```bash
-# 依存関係のインストール
-pip install -r requirements.txt
+### 検索API
+```http
+POST /api/search
+Content-Type: application/json
 
-# 環境変数設定（オプション）
-echo "OPENAI_API_KEY=your_api_key_here" > .env
-```
-
-### 2. サーバー起動
-```bash
-cd src
-python app.py
-```
-デフォルトでポート8000で起動: http://localhost:8000
-
-### 3. 組み込み方法
-生成されるHTMLファイルをiframeやウィジェットとしてプロダクトサイトに埋め込み可能
-
-## API エンドポイント
-
-### POST /search
-ユーザーの質問に対する回答を検索
-```json
 {
-  "question": "AIキャラクターについて教えて",
-  "category": "サービス内容について"  // オプション
+  "question": "PIP-Makerとは何ですか？",
+  "category": "general"  // オプション
 }
 ```
 
-### POST /submit
-問い合わせフォームデータの送信
-```json
+### フィードバックAPI
+```http
+POST /api/feedback
+Content-Type: application/json
+
 {
-  "name": "田中太郎",
-  "email": "tanaka@example.com",
-  "phone": "090-1234-5678",
-  "company": "株式会社サンプル",
-  "message": "PIP-Makerについて詳しく知りたいです"
+  "conversation_id": "unique-id",
+  "rating": "positive",  // "positive" | "negative"
+  "comment": "役に立ちました"  // オプション
 }
 ```
 
-## 特徴的な機能
+### ヘルスチェック
+```http
+GET /health
+```
 
-### インテリジェント検索
-- OpenAI APIが利用可能な場合は高精度なセマンティック検索
-- APIキーがない場合は文字列類似度による検索に自動フォールバック
-- 信頼度閾値による回答品質の担保
+## ⚙️ 設定
 
-### 柔軟な運用
-- ファイルプロトコル（file://）でも動作する完全なクライアントサイド対応
-- サーバーエラー時の graceful degradation
-- 環境変数での簡単な設定管理
+### 環境変数
 
-### コンバージョン最適化
-- 段階的な情報提供による信頼関係構築
-- 自然な会話フローでの問い合わせ誘導
-- 離脱防止のための柔軟な質問スキップ機能
+| 変数名 | 説明 | デフォルト値 |
+|--------|------|-------------|
+| `CSV_FILE_PATH` | Q&AデータのCSVファイルパス | `qa_data.csv` |
+| `SLACK_WEBHOOK_URL` | Slack通知用WebhookURL | なし |
+| `SEARCH_SIMILARITY_THRESHOLD` | 検索の類似度閾値 | `0.1` |
+| `RATE_LIMIT_PER_MINUTE` | レート制限（分間リクエスト数） | `10` |
+| `LOG_LEVEL` | ログレベル | `INFO` |
 
-## 今後の拡張可能性
+### CSVデータ形式
 
-- 外部データベースとの連携
+```csv
+質問,回答,対応カテゴリー,根拠資料,備考
+"PIP-Makerとは何ですか？","PIP-Makerは...","general","公式サイト",""
+```
+
+## 🔒 セキュリティ
+
+- レート制限による不正利用防止
+- 入力値バリデーション
+- エラー情報の適切な制御
+- CORS設定（本番環境では要設定）
+
+## 📊 監視・ログ
+
+- 構造化ログ出力
+- Slack通知連携
+- エラートラッキング
+- パフォーマンス監視
+
+## 🚧 今後の開発予定
+
+### Phase 2（中期）
+- AI/LLM統合（OpenAI GPT-4）
+- ベクトル検索（ChromaDB）
+- Google Sheets連携
+- 高度なUX改善
+
+### Phase 3（長期）
+- リアルタイム分析ダッシュボード
 - 多言語対応
-- A/Bテスト機能
-- アナリティクス統合
-- リアルタイム通知機能
 - CRM連携
+- 自動学習機能
 
-## ライセンス
+## 🤝 コントリビューション
 
-このプロジェクトは、PIP-Makerプロダクトサイトでの使用を目的として開発されています。
+1. フォークしてブランチを作成
+2. 変更を実装
+3. テストを追加・実行
+4. プルリクエストを作成
+
+## 📄 ライセンス
+
+このプロジェクトは [MIT License](LICENSE) の下で公開されています。
+
+## 🆘 サポート
+
+問題や質問がある場合は、[Issues](../../issues) でお知らせください。
+
+---
+
+**PIP-Maker開発チーム**
