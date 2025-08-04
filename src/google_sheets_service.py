@@ -5,6 +5,7 @@ Google SheetsからリアルタイムでQ&Aデータを取得するサービス
 Phase 1.5.1 - Google Sheets統合機能
 """
 
+import json
 import logging
 import os
 from typing import Dict, List, Optional
@@ -388,11 +389,16 @@ class GoogleSheetsService:
 
     def get_connection_status(self) -> Dict[str, any]:
         """接続状況を取得"""
+        # 🔧 環境変数での認証情報確認
+        has_env_credentials = bool(os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON'))
+        has_file_credentials = bool(self.credentials_path and os.path.exists(self.credentials_path))
+        
         return {
             'google_sheets_available': GOOGLE_SHEETS_AVAILABLE,
             'service_initialized': self._service is not None,
             'spreadsheet_id': self.spreadsheet_id,
-            'credentials_configured': bool(self.credentials_path),
-            'credentials_exists': os.path.exists(self.credentials_path) if self.credentials_path else False,
+            'credentials_configured': has_env_credentials or has_file_credentials,
+            'credentials_source': 'environment_variable' if has_env_credentials else 'file' if has_file_credentials else 'none',
+            'credentials_exists': has_env_credentials or has_file_credentials,
             'fallback_csv_available': bool(self.fallback_csv_path and os.path.exists(self.fallback_csv_path))
         }
