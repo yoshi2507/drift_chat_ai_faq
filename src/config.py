@@ -20,8 +20,8 @@ class Settings(BaseSettings):
     host: str = Field(default="127.0.0.1", alias="HOST")
     port: int = Field(default=8000, alias="PORT")
     
-    # データソース設定 - 🔧 最終修正: /qa_data.csv
-    csv_file_path: str = Field(default="/qa_data.csv", alias="CSV_FILE_PATH")
+    # データソース設定 - 🔧 最終修正: ./qa_data.csv
+    csv_file_path: str = Field(default="qa_data.csv", alias="CSV_FILE_PATH")
     
     # Google Sheets設定
     google_sheets_enabled: bool = Field(default=False, alias="GOOGLE_SHEETS_ENABLED")

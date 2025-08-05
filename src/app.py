@@ -37,7 +37,7 @@ except ImportError as e:
     
     # フォールバック設定
     class FallbackSettings:
-        csv_file_path = "/qa_data.csv"  # 🔧 パス修正
+        csv_file_path = "qa_data.csv"  # 🔧 パス修正
         app_name = "PIP‑Maker Chat API"
         app_version = "1.5.1"
         search_similarity_threshold = 0.1
