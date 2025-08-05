@@ -1,8 +1,8 @@
-# enhanced_sheet_service.py - Phase 1.5 拡張シートサービス（修正版）
+# enhanced_sheet_service.py - パス修正版
 
 """
 拡張されたGoogle Sheets/CSVサービス
-FAQ機能とカテゴリー検索に対応
+FAQ機能とカテゴリー検索に対応 - Render環境対応版
 """
 
 import csv
@@ -18,19 +18,16 @@ class SheetAccessException(Exception):
     pass
 
 class EnhancedGoogleSheetsService:
-    """拡張されたCSV/スプレッドシートサービス（FAQ対応）"""
+    """拡張されたCSV/スプレッドシートサービス（FAQ対応・Render修正版）"""
     
     def __init__(self, csv_path: str):
         """
         Args:
             csv_path: CSVファイルのパス
         """
-        # 相対パスを絶対パスに変換
-        if not os.path.isabs(csv_path):
-            self.csv_path = os.path.join(os.path.dirname(__file__), csv_path)
-        else:
-            self.csv_path = csv_path
-            
+        # 🔧 パス解決ロジックを修正
+        self.csv_path = self._resolve_csv_path(csv_path)
+        
         self._cache: Optional[List[Dict[str, str]]] = None
         self._cache_timestamp: Optional[datetime] = None
         self.cache_ttl_seconds = 300  # 5分間キャッシュ
@@ -47,6 +44,31 @@ class EnhancedGoogleSheetsService:
         }
         
         LOGGER.info(f"EnhancedGoogleSheetsService initialized with CSV: {self.csv_path}")
+
+    def _resolve_csv_path(self, csv_path: str) -> str:
+        """CSVパスを適切に解決する"""
+        
+        # 🔧 複数のパス候補を試行
+        possible_paths = [
+            csv_path,                                    # 元のパス
+            os.path.join("src", "qa_data.csv"),         # src/qa_data.csv
+            os.path.join(".", "src", "qa_data.csv"),    # ./src/qa_data.csv  
+            "qa_data.csv",                              # qa_data.csv
+            os.path.join("..", "qa_data.csv")           # ../qa_data.csv
+        ]
+        
+        # 存在するパスを探す
+        for path in possible_paths:
+            abs_path = os.path.abspath(path)
+            if os.path.exists(path):
+                LOGGER.info(f"✅ CSVファイル見つかりました: {path} → {abs_path}")
+                return path
+            else:
+                LOGGER.debug(f"❌ CSVファイル無し: {path} → {abs_path}")
+        
+        # どれも見つからない場合は元のパスを返す（エラーは後で処理）
+        LOGGER.warning(f"⚠️ CSVファイルが見つかりませんが、元のパスを使用: {csv_path}")
+        return csv_path
 
     def _normalize_row(self, row: Dict[str, str]) -> Dict[str, str]:
         """CSVの行データを正規化（日本語キー → 英語キー）"""
@@ -85,7 +107,12 @@ class EnhancedGoogleSheetsService:
         try:
             # CSVファイルの存在確認
             if not os.path.exists(self.csv_path):
-                raise SheetAccessException(f"CSVファイルが見つかりません: {self.csv_path}")
+                # 🔧 存在しない場合は再度パス解決を試行
+                LOGGER.warning(f"CSVファイルが見つかりません: {self.csv_path}")
+                self.csv_path = self._resolve_csv_path(self.csv_path)
+                
+                if not os.path.exists(self.csv_path):
+                    raise SheetAccessException(f"CSVファイルが見つかりません: {self.csv_path}")
             
             with open(self.csv_path, newline='', encoding='utf-8') as fp:
                 reader = csv.DictReader(fp)
@@ -244,5 +271,6 @@ class EnhancedGoogleSheetsService:
             'cache_timestamp': self._cache_timestamp.isoformat() if self._cache_timestamp else None,
             'cache_valid': self._is_cache_valid(),
             'csv_path': self.csv_path,
-            'csv_exists': os.path.exists(self.csv_path)
+            'csv_exists': os.path.exists(self.csv_path),
+            'csv_absolute_path': os.path.abspath(self.csv_path)
         }

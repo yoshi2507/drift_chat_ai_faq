@@ -1,7 +1,7 @@
-# src/app.py - インポート修正版
+# src/app.py - 最終修正版
 
 """
-PIP-Maker チャットボット Phase 1.5.1 - Render対応修正版
+PIP-Maker チャットボット Phase 1.5.1 - 最終修正版
 """
 
 import csv
@@ -20,24 +20,29 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-# 🔧 設定とサービスインポート修正
+LOGGER = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+# 🔧 設定とサービスインポート（修正版）
 try:
     from .config import get_settings, create_data_service
     from .conversation_flow import ConversationFlowService, ConversationState, ConversationContext
     settings = get_settings()
-    LOGGER = logging.getLogger(__name__)
     LOGGER.info("✅ 正常なインポート完了")
+    
+    # データサービスを作成
+    data_service = create_data_service()
+    LOGGER.info(f"データサービス初期化完了: {type(data_service).__name__}")
+    
 except ImportError as e:
+    LOGGER.error(f"❌ インポートエラー: {e}")
     print(f"❌ ConversationFlow import error: {e}")
     print(f"Current working directory: {os.getcwd()}")
     print(f"Python path: {sys.path}")
-    print(f"Files in current directory: {list(Path('.').iterdir())}")
-    print(f"Files in src directory: {list(Path('./src').iterdir()) if Path('./src').exists() else 'src directory not found'}")
-    print("⚠️ Using fallback classes for ConversationFlow")
     
-    # フォールバック設定
+    # フォールバック設定（緊急用）
     class FallbackSettings:
-        csv_file_path = "qa_data.csv"  # 🔧 パス修正
+        csv_file_path = "src/qa_data.csv"  # 🔧 正しいパスに修正
         app_name = "PIP‑Maker Chat API"
         app_version = "1.5.1"
         search_similarity_threshold = 0.1
@@ -50,6 +55,16 @@ except ImportError as e:
             return {'google_sheets_enabled': False, 'csv_fallback': self.csv_file_path}
     
     settings = FallbackSettings()
+    
+    # フォールバック データサービス
+    try:
+        sys.path.append(os.path.dirname(__file__))
+        from enhanced_sheet_service import EnhancedGoogleSheetsService
+        data_service = EnhancedGoogleSheetsService(settings.csv_file_path)
+        LOGGER.info("✅ フォールバック データサービス初期化完了")
+    except Exception as import_error:
+        LOGGER.error(f"⚠️ フォールバック データサービス初期化失敗: {import_error}")
+        data_service = None
     
     # フォールバック ConversationFlowService クラス
     class FallbackConversationFlowService:
@@ -67,21 +82,6 @@ except ImportError as e:
             return None
     
     ConversationFlowService = FallbackConversationFlowService
-    
-    def create_data_service():
-        """フォールバック版データサービス作成"""
-        try:
-            # 絶対パス指定でインポートを試行
-            sys.path.append(os.path.dirname(__file__))
-            from enhanced_sheet_service import EnhancedGoogleSheetsService
-            return EnhancedGoogleSheetsService(settings.csv_file_path)
-        except Exception as import_error:
-            print(f"⚠️ Enhanced sheet service import failed: {import_error}")
-            # 最低限のフォールバック
-            return None
-
-LOGGER = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 # 例外クラス
 class ChatBotException(Exception):
@@ -281,26 +281,13 @@ class FeedbackService:
             await self.slack_service.notify_negative_feedback(feedback)
 
 # サービスの初期化
-try:
-    # データサービスを設定に基づいて作成
-    data_service = create_data_service()
-    LOGGER.info(f"データサービス初期化完了: {type(data_service).__name__}")
-    
-    # データソース設定の表示
-    data_config = settings.get_data_source_config()
-    LOGGER.info(f"データソース設定: {data_config}")
-    
-except Exception as e:
-    LOGGER.error(f"データサービス初期化エラー: {e}")
-    # 最終フォールバック
-    data_service = None
-
 if data_service:
     conversation_flow_service = ConversationFlowService(data_service)
     search_service = SearchService(data_service)
 else:
     conversation_flow_service = None
     search_service = None
+    LOGGER.error("❌ データサービスが利用できません")
 
 # Slack通知サービスの初期化
 slack_webhook_url = getattr(settings, 'slack_webhook_url', None)
@@ -311,9 +298,9 @@ feedback_service = FeedbackService(slack_service)
 app_name = getattr(settings, 'app_name', 'PIP‑Maker Chat API')
 app_version = getattr(settings, 'app_version', '1.5.1')
 app = FastAPI(
-    title=f"{app_name} (Render対応版)", 
+    title=f"{app_name} (最終修正版)", 
     version=app_version,
-    description="Render環境対応修正版"
+    description="Render環境最終対応版"
 )
 
 # 例外ハンドラー
@@ -372,14 +359,14 @@ async def index() -> HTMLResponse:
             <title>PIP-Maker Chat</title>
             <style>
                 body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
-                .error { background: #ffebee; padding: 20px; border-radius: 8px; }
+                .success { background: #e8f5e8; padding: 20px; border-radius: 8px; border: 1px solid #4caf50; }
             </style>
         </head>
         <body>
-            <div class="error">
-                <h1>🚧 システム起動中</h1>
-                <p>PIP-Makerチャットボットのセットアップを完了しています。</p>
-                <p>しばらくお待ちください...</p>
+            <div class="success">
+                <h1>🎉 PIP-Maker チャットボット</h1>
+                <p>システムが起動しました！</p>
+                <p>チャット機能を利用できます。</p>
             </div>
         </body>
         </html>"""
@@ -388,15 +375,19 @@ async def index() -> HTMLResponse:
     return HTMLResponse(content=html_content)
 
 @app.get("/health")
-async def health() -> Dict[str, str]:
+async def health() -> Dict[str, Any]:
     """ヘルスチェックエンドポイント"""
+    csv_path = getattr(settings, 'csv_file_path', 'unknown')
+    
     return {
         "status": "ok", 
         "version": app_version,
-        "phase": "1.5.1-render-fix",
-        "data_service": "active" if data_service else "fallback",
-        "csv_path": settings.csv_file_path,
-        "csv_exists": str(os.path.exists(settings.csv_file_path))
+        "phase": "1.5.1-final-fix",
+        "data_service": type(data_service).__name__ if data_service else "None",
+        "search_service": type(search_service).__name__ if search_service else "None",
+        "csv_path": csv_path,
+        "csv_exists": os.path.exists(csv_path) if csv_path != 'unknown' else False,
+        "csv_absolute_path": os.path.abspath(csv_path) if csv_path != 'unknown' else 'unknown'
     }
 
 @app.post("/api/search", response_model=SearchResponse)
@@ -475,17 +466,25 @@ async def get_welcome_message() -> Dict[str, Any]:
 @app.get("/debug/status")
 async def debug_status() -> Dict[str, Any]:
     """デバッグ情報を表示"""
-    return {
+    csv_path = getattr(settings, 'csv_file_path', 'unknown')
+    
+    debug_info = {
         "working_directory": os.getcwd(),
-        "csv_path": settings.csv_file_path,
-        "csv_absolute_path": os.path.abspath(settings.csv_file_path),
-        "csv_exists": os.path.exists(settings.csv_file_path),
+        "csv_path": csv_path,
+        "csv_absolute_path": os.path.abspath(csv_path) if csv_path != 'unknown' else 'unknown',
+        "csv_exists": os.path.exists(csv_path) if csv_path != 'unknown' else False,
         "data_service": type(data_service).__name__ if data_service else "None",
         "conversation_flow_service": type(conversation_flow_service).__name__ if conversation_flow_service else "None",
         "search_service": type(search_service).__name__ if search_service else "None",
         "directory_contents": list(os.listdir(os.getcwd())),
-        "python_path": sys.path[:3]  # 最初の3つのパスのみ
+        "src_directory_contents": list(os.listdir('./src')) if os.path.exists('./src') else "src directory not found"
     }
+    
+    # データサービスの詳細情報
+    if data_service and hasattr(data_service, 'get_cache_info'):
+        debug_info['data_service_cache'] = data_service.get_cache_info()
+    
+    return debug_info
 
 # 静的ファイル配信（修正版）
 project_root = Path(__file__).parent.parent
@@ -510,25 +509,41 @@ if not static_mounted:
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時の初期化処理"""
-    LOGGER.info("=== PIP-Maker Chatbot Phase 1.5.1 起動 (Render対応版) ===")
+    LOGGER.info("=== PIP-Maker Chatbot Phase 1.5.1 起動 (最終修正版) ===")
     
     # 🔧 デバッグ情報出力
+    csv_path = getattr(settings, 'csv_file_path', 'unknown')
     LOGGER.info(f"作業ディレクトリ: {os.getcwd()}")
-    LOGGER.info(f"CSVパス設定: {settings.csv_file_path}")
-    LOGGER.info(f"CSV絶対パス: {os.path.abspath(settings.csv_file_path)}")
-    LOGGER.info(f"CSV存在確認: {os.path.exists(settings.csv_file_path)}")
+    LOGGER.info(f"CSVパス設定: {csv_path}")
+    LOGGER.info(f"CSV絶対パス: {os.path.abspath(csv_path) if csv_path != 'unknown' else 'unknown'}")
+    LOGGER.info(f"CSV存在確認: {os.path.exists(csv_path) if csv_path != 'unknown' else False}")
     
     # ディレクトリ内容確認
     LOGGER.info("📁 ディレクトリ内容:")
     for item in os.listdir('.'):
         LOGGER.info(f"  {item}")
     
+    # srcディレクトリ内容確認
+    if os.path.exists('./src'):
+        LOGGER.info("📁 src ディレクトリ内容:")
+        for item in os.listdir('./src'):
+            LOGGER.info(f"  src/{item}")
+    
     if data_service:
         try:
             data = await data_service.get_qa_data()
             LOGGER.info(f"✅ Q&Aデータ: {len(data)}件を読み込み完了")
+            
+            # サンプルデータを表示
+            if data:
+                sample = data[0]
+                LOGGER.info(f"サンプルデータ: {sample.get('question', 'N/A')[:50]}...")
+                
         except Exception as e:
             LOGGER.error(f"❌ データ読み込みエラー: {e}")
+            # エラー詳細を表示
+            import traceback
+            LOGGER.error(f"エラー詳細: {traceback.format_exc()}")
     else:
         LOGGER.warning("⚠️ データサービスが初期化されていません")
     
@@ -536,5 +551,6 @@ async def startup_event():
 
 # デバッグ情報出力
 if getattr(settings, 'debug', False):
-    LOGGER.info("=== デバッグモード (Render対応版) ===")
-    settings.debug_settings()
+    LOGGER.info("=== デバッグモード (最終修正版) ===")
+    if hasattr(settings, 'debug_settings'):
+        settings.debug_settings()

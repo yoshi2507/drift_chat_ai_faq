@@ -1,5 +1,5 @@
 """
-PIP-Maker チャットボットの設定管理（最終修正版）
+PIP-Maker チャットボットの設定管理（シンプル修正版）
 """
 
 import os
@@ -20,8 +20,8 @@ class Settings(BaseSettings):
     host: str = Field(default="127.0.0.1", alias="HOST")
     port: int = Field(default=8000, alias="PORT")
     
-    # データソース設定 - 🔧 最終修正: ./qa_data.csv
-    csv_file_path: str = Field(default="qa_data.csv", alias="CSV_FILE_PATH")
+    # データソース設定 - 🔧 シンプルに src/qa_data.csv に固定
+    csv_file_path: str = Field(default="src/qa_data.csv", alias="CSV_FILE_PATH")
     
     # Google Sheets設定
     google_sheets_enabled: bool = Field(default=False, alias="GOOGLE_SHEETS_ENABLED")
@@ -75,25 +75,14 @@ class Settings(BaseSettings):
         
     def debug_settings(self):
         """デバッグ用：設定値を表示"""
-        print("=== 設定値デバッグ（最終修正版）===")
+        print("=== 設定値デバッグ（シンプル修正版）===")
         print(f"current directory: {os.getcwd()}")
         print(f"csv_file_path: {self.csv_file_path}")
         print(f"csv_file_path (abs): {os.path.abspath(self.csv_file_path)}")
         print(f"csv_file_exists: {os.path.exists(self.csv_file_path)}")
         
-        # 🔧 CSVファイル探索
-        possible_csv_paths = [
-            "./qa_data.csv",           # 同じディレクトリ
-            "./src/qa_data.csv",       # srcサブディレクトリ
-            "../qa_data.csv",          # 親ディレクトリ  
-            "qa_data.csv"              # 相対パス
-        ]
-        
-        print(f"\n🔍 CSVファイル探索結果:")
-        for path in possible_csv_paths:
-            exists = os.path.exists(path)
-            abs_path = os.path.abspath(path)
-            print(f"  {path} → {abs_path} ({'✅' if exists else '❌'})")
+        # 🔧 修正: EnhancedGoogleSheetsService のパス解決に任せる
+        print(f"\n📝 Note: パス解決は EnhancedGoogleSheetsService に委ねます")
 
 
 # グローバル設定インスタンス
