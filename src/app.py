@@ -62,7 +62,41 @@ except ImportError:
             return EnhancedGoogleSheetsService(settings.csv_file_path)
 
 # サービスクラスをインポート（同一ディレクトリから）
-from conversation_flow import ConversationFlowService, ConversationState, ConversationContext
+# 🔧 サービスクラスをインポート（エラーハンドリング強化）
+try:
+    from conversation_flow import ConversationFlowService, ConversationState, ConversationContext
+    CONVERSATION_FLOW_AVAILABLE = True
+    print("✅ ConversationFlowService successfully imported")
+except ImportError as e:
+    print(f"❌ ConversationFlow import error: {e}")
+    print(f"Current working directory: {os.getcwd()}")
+    print(f"Python path: {sys.path}")
+    print(f"Files in current directory: {list(Path('.').glob('*'))}")
+    print(f"Files in src directory: {list(Path(__file__).parent.glob('*'))}")
+    
+    # フォールバック用の最小限クラス
+    class ConversationFlowService:
+        def __init__(self, data_service):
+            self.data_service = data_service
+        
+        async def get_welcome_message(self):
+            return {
+                "message": "こんにちは！PIP-Makerについてお聞かせください。（フォールバックモード）",
+                "type": "fallback",
+                "categories": []
+            }
+        
+        def get_conversation_context(self, conversation_id):
+            return None
+    
+    class ConversationState:
+        INITIAL = "initial"
+    
+    class ConversationContext:
+        pass
+    
+    CONVERSATION_FLOW_AVAILABLE = False
+    print("⚠️ Using fallback classes for ConversationFlow")
 
 LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
