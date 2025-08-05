@@ -1,5 +1,5 @@
 """
-PIP-Maker チャットボットの設定管理（Render対応修正版）
+PIP-Maker チャットボットの設定管理（最終修正版）
 """
 
 import os
@@ -20,8 +20,8 @@ class Settings(BaseSettings):
     host: str = Field(default="127.0.0.1", alias="HOST")
     port: int = Field(default=8000, alias="PORT")
     
-    # データソース設定 - 🔧 Render対応パス修正
-    csv_file_path: str = Field(default="../qa_data.csv", alias="CSV_FILE_PATH")
+    # データソース設定 - 🔧 最終修正: ./qa_data.csv
+    csv_file_path: str = Field(default="./qa_data.csv", alias="CSV_FILE_PATH")
     
     # Google Sheets設定
     google_sheets_enabled: bool = Field(default=False, alias="GOOGLE_SHEETS_ENABLED")
@@ -75,24 +75,25 @@ class Settings(BaseSettings):
         
     def debug_settings(self):
         """デバッグ用：設定値を表示"""
-        print("=== 設定値デバッグ（Render対応版）===")
+        print("=== 設定値デバッグ（最終修正版）===")
         print(f"current directory: {os.getcwd()}")
         print(f"csv_file_path: {self.csv_file_path}")
         print(f"csv_file_path (abs): {os.path.abspath(self.csv_file_path)}")
         print(f"csv_file_exists: {os.path.exists(self.csv_file_path)}")
         
-        # 🔧 ディレクトリ構造をチェック
-        current_dir = os.getcwd()
-        print(f"\n📁 Directory structure:")
-        for item in os.listdir(current_dir):
-            item_path = os.path.join(current_dir, item)
-            if os.path.isfile(item_path):
-                print(f"  📄 {item}")
-            else:
-                print(f"  📁 {item}/")
-                if item == 'src':
-                    for sub_item in os.listdir(item_path):
-                        print(f"    📄 {sub_item}")
+        # 🔧 CSVファイル探索
+        possible_csv_paths = [
+            "./qa_data.csv",           # 同じディレクトリ
+            "./src/qa_data.csv",       # srcサブディレクトリ
+            "../qa_data.csv",          # 親ディレクトリ  
+            "qa_data.csv"              # 相対パス
+        ]
+        
+        print(f"\n🔍 CSVファイル探索結果:")
+        for path in possible_csv_paths:
+            exists = os.path.exists(path)
+            abs_path = os.path.abspath(path)
+            print(f"  {path} → {abs_path} ({'✅' if exists else '❌'})")
 
 
 # グローバル設定インスタンス
@@ -104,7 +105,7 @@ def get_settings() -> Settings:
     return settings
 
 
-# データサービスファクトリー関数 - 🔧 インポート修正
+# データサービスファクトリー関数
 def create_data_service():
     """設定に基づいて適切なデータサービスを作成"""
     try:
@@ -112,14 +113,12 @@ def create_data_service():
         from .enhanced_sheet_service import EnhancedGoogleSheetsService
         
         if settings.is_google_sheets_configured:
-            # Google Sheets統合サービスを使用
             return GoogleSheetsService(
                 spreadsheet_id=settings.google_sheets_id,
                 credentials_path=settings.google_credentials_path,
                 fallback_csv_path=settings.csv_file_path
             )
         else:
-            # 従来のCSVサービスを使用
             return EnhancedGoogleSheetsService(settings.csv_file_path)
             
     except ImportError as e:
