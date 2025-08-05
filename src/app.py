@@ -62,7 +62,7 @@ except ImportError:
             return EnhancedGoogleSheetsService(settings.csv_file_path)
 
 # サービスクラスをインポート（同一ディレクトリから）
-from .conversation_flow import ConversationFlowService, ConversationState, ConversationContext
+from conversation_flow import ConversationFlowService, ConversationState, ConversationContext
 
 LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
