@@ -1,8 +1,8 @@
-# src/google_sheets_service.py - Google Sheets API統合サービス
+# src/google_sheets_service.py - Render対応版
 
 """
 Google SheetsからリアルタイムでQ&Aデータを取得するサービス
-Phase 1.5.1 - Google Sheets統合機能
+Phase 1.5.1 - Render環境対応版
 """
 
 import json
@@ -30,7 +30,7 @@ class GoogleSheetsException(Exception):
     pass
 
 class GoogleSheetsService:
-    """Google Sheets API統合サービス"""
+    """Google Sheets API統合サービス（Render対応版）"""
     
     def __init__(
         self, 
@@ -86,10 +86,10 @@ class GoogleSheetsService:
                 scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
             )
             self._service = build('sheets', 'v4', credentials=credentials)
-            LOGGER.info(f"Google Sheets APIサービスを初期化しました (ID: {self.spreadsheet_id[:10]}...)")
+            LOGGER.info(f"✅ Google Sheets APIサービスを初期化しました (ID: {self.spreadsheet_id[:10]}...)")
             
         except Exception as e:
-            LOGGER.error(f"Google Sheets API初期化エラー: {e}")
+            LOGGER.error(f"❌ Google Sheets API初期化エラー: {e}")
             self._service = None
 
     def _normalize_row(self, row_values: List[str], headers: List[str]) -> Dict[str, str]:
@@ -140,7 +140,7 @@ class GoogleSheetsService:
             if not headers:
                 raise GoogleSheetsException("ヘッダー行が見つかりません")
             
-            LOGGER.debug(f"ヘッダー: {headers}")
+            LOGGER.info(f"📊 スプレッドシートヘッダー: {headers}")
             
             # データ行を処理
             data_rows = []
@@ -156,12 +156,12 @@ class GoogleSheetsService:
                     LOGGER.warning(f"行 {row_num} の処理でエラー: {e}")
                     continue
             
-            LOGGER.info(f"Google Sheetsから {len(data_rows)} 件のデータを取得しました")
+            LOGGER.info(f"✅ Google Sheetsから {len(data_rows)} 件のデータを取得しました")
             return data_rows
             
         except HttpError as e:
             error_details = e.error_details if hasattr(e, 'error_details') else str(e)
-            LOGGER.error(f"Google Sheets API HTTP エラー: {error_details}")
+            LOGGER.error(f"❌ Google Sheets API HTTP エラー: {error_details}")
             
             if e.resp.status == 403:
                 raise GoogleSheetsException("アクセス権限がありません。スプレッドシートにサービスアカウントを共有してください。")
@@ -171,7 +171,7 @@ class GoogleSheetsService:
                 raise GoogleSheetsException(f"Google Sheets APIエラー: {error_details}")
                 
         except Exception as e:
-            LOGGER.error(f"Google Sheets データ取得エラー: {e}")
+            LOGGER.error(f"❌ Google Sheets データ取得エラー: {e}")
             raise GoogleSheetsException(f"データ取得に失敗しました: {str(e)}")
 
     async def _fetch_from_fallback_csv(self) -> List[Dict[str, str]]:
@@ -190,7 +190,7 @@ class GoogleSheetsService:
             return await csv_service.get_qa_data()
             
         except Exception as e:
-            LOGGER.error(f"フォールバックCSV読み込みエラー: {e}")
+            LOGGER.error(f"❌ フォールバックCSV読み込みエラー: {e}")
             raise GoogleSheetsException(f"フォールバックCSVの読み込みに失敗: {str(e)}")
 
     def _is_cache_valid(self) -> bool:
@@ -219,10 +219,10 @@ class GoogleSheetsService:
                 LOGGER.info("✅ Google Sheetsからデータを取得しました")
             except GoogleSheetsException as e:
                 error_messages.append(f"Google Sheets: {str(e)}")
-                LOGGER.warning(f"Google Sheets取得失敗: {e}")
+                LOGGER.warning(f"⚠️ Google Sheets取得失敗: {e}")
             except Exception as e:
                 error_messages.append(f"Google Sheets: 予期しないエラー: {str(e)}")
-                LOGGER.error(f"Google Sheets予期しないエラー: {e}")
+                LOGGER.error(f"❌ Google Sheets予期しないエラー: {e}")
         else:
             error_messages.append("Google Sheets: APIサービスが初期化されていません")
         
@@ -233,7 +233,7 @@ class GoogleSheetsService:
                 LOGGER.info("📄 フォールバックCSVからデータを取得しました")
             except Exception as e:
                 error_messages.append(f"フォールバックCSV: {str(e)}")
-                LOGGER.error(f"フォールバックCSV取得も失敗: {e}")
+                LOGGER.error(f"❌ フォールバックCSV取得も失敗: {e}")
         
         if not data:
             error_summary = " | ".join(error_messages)
@@ -288,76 +288,6 @@ class GoogleSheetsService:
             LOGGER.error(f"FAQ ID検索エラー: {e}")
             return None
 
-    async def search_qa_data(
-        self, 
-        query: str, 
-        category: Optional[str] = None,
-        include_faqs_only: bool = False
-    ) -> List[Dict[str, str]]:
-        """Q&Aデータの検索（カテゴリーフィルター付き）"""
-        try:
-            data = await self.get_qa_data()
-            results = []
-            
-            query_lower = query.lower().strip()
-            
-            for row in data:
-                # カテゴリーフィルター
-                if category:
-                    row_category = row.get('category', '').lower().strip()
-                    if row_category != category.lower():
-                        continue
-                
-                # FAQのみフィルター
-                if include_faqs_only and row.get('notes') != 'よくある質問':
-                    continue
-                
-                # テキスト検索（質問と回答の両方で検索）
-                question = row.get('question', '').lower()
-                answer = row.get('answer', '').lower()
-                
-                if query_lower in question or query_lower in answer:
-                    results.append(row)
-            
-            LOGGER.info(f"検索クエリ '{query}' (カテゴリー: {category}): {len(results)}件")
-            return results
-            
-        except Exception as e:
-            LOGGER.error(f"Q&A検索エラー: {e}")
-            return []
-
-    async def get_categories_summary(self) -> Dict[str, Dict[str, any]]:
-        """カテゴリー別の統計情報を取得"""
-        try:
-            data = await self.get_qa_data()
-            categories = {}
-            
-            for row in data:
-                category = row.get('category', '').strip()
-                if not category:
-                    continue
-                    
-                if category not in categories:
-                    categories[category] = {
-                        'total_count': 0,
-                        'faq_count': 0,
-                        'general_count': 0
-                    }
-                
-                categories[category]['total_count'] += 1
-                
-                if row.get('notes') == 'よくある質問':
-                    categories[category]['faq_count'] += 1
-                else:
-                    categories[category]['general_count'] += 1
-            
-            LOGGER.info(f"カテゴリー統計: {len(categories)}カテゴリー")
-            return categories
-            
-        except Exception as e:
-            LOGGER.error(f"カテゴリー統計取得エラー: {e}")
-            return {}
-
     def clear_cache(self):
         """キャッシュをクリア"""
         self._cache = None
@@ -378,27 +308,12 @@ class GoogleSheetsService:
             'credentials_exists': os.path.exists(self.credentials_path) if self.credentials_path else False
         }
 
-    async def refresh_data(self) -> bool:
-        """データを強制リフレッシュ"""
-        try:
-            await self.get_qa_data(force_refresh=True)
-            return True
-        except Exception as e:
-            LOGGER.error(f"データリフレッシュ失敗: {e}")
-            return False
-
     def get_connection_status(self) -> Dict[str, any]:
         """接続状況を取得"""
-        # 🔧 環境変数での認証情報確認
-        has_env_credentials = bool(os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON'))
-        has_file_credentials = bool(self.credentials_path and os.path.exists(self.credentials_path))
-        
         return {
             'google_sheets_available': GOOGLE_SHEETS_AVAILABLE,
             'service_initialized': self._service is not None,
             'spreadsheet_id': self.spreadsheet_id,
-            'credentials_configured': has_env_credentials or has_file_credentials,
-            'credentials_source': 'environment_variable' if has_env_credentials else 'file' if has_file_credentials else 'none',
-            'credentials_exists': has_env_credentials or has_file_credentials,
+            'credentials_configured': bool(self.credentials_path and os.path.exists(self.credentials_path)),
             'fallback_csv_available': bool(self.fallback_csv_path and os.path.exists(self.fallback_csv_path))
         }

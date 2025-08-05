@@ -84,7 +84,7 @@ class ConversationFlowService:
         ]
         
         return {
-            "message": "こんにちは！PIP-Maker HPにお越しいただきありがとうございます。\n興味があることを以下から選んでください。",
+            "message": "こんにちは！PIP-Makerについてお答えできる範囲でお答えします。\n興味があることを以下から選んでください。",
             "type": "category_selection",
             "categories": categories
         }

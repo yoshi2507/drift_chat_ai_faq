@@ -48,6 +48,7 @@
             font-size: 14px;
             word-break: break-word;
             animation: slideIn 0.3s ease-out;
+            white-space: pre-wrap;
         }
 
         .message.user {
@@ -389,45 +390,47 @@
         }
 
         function addMessage(container, content, sender = 'bot', options = {}) {
-            const messageEl = document.createElement('div');
-            messageEl.classList.add('message');
-            messageEl.classList.add(sender === 'user' ? 'user' : 'bot');
+                const messageEl = document.createElement('div');
+                messageEl.classList.add('message');
+                messageEl.classList.add(sender === 'user' ? 'user' : 'bot');
+        
+                if (typeof content === 'string') {
+                    // 🔧 改行文字を <br> タグに変換
+                    const processedContent = content
+                       .replace(/\r\n/g, '\n')  // Windows改行を統一
+                       .replace(/\r/g, '\n')    // Mac改行を統一
+                       .replace(/\n/g, '<br>'); // 改行を<br>タグに変換
             
-            if (typeof content === 'string') {
-                // HTMLコンテンツとしてではなく、DOM要素として追加
-                if (content.includes('<') && content.includes('>')) {
-                    messageEl.innerHTML = content;
+                    // HTMLコンテンツとして設定
+                    messageEl.innerHTML = processedContent;
                 } else {
-                    messageEl.textContent = content;
-                }
-            } else {
-                if (content instanceof HTMLElement) {
-                    messageEl.appendChild(content);
-                } else {
-                    messageEl.appendChild(content);
-                }
-            }
-            
-            container.appendChild(messageEl);
-            container.scrollTop = container.scrollHeight;
-            
-            // 信頼度スコア表示
-            if (sender === 'bot' && options.confidence !== undefined) {
-                const confidenceEl = document.createElement('div');
-                confidenceEl.style.fontSize = '11px';
-                confidenceEl.style.color = '#6c757d';
-                confidenceEl.style.marginTop = '6px';
-                confidenceEl.style.fontStyle = 'italic';
-                confidenceEl.textContent = `信頼度: ${Math.round(options.confidence * 100)}%`;
-                messageEl.appendChild(confidenceEl);
-            }
-            
-            // フィードバックボタン追加
-            if (sender === 'bot' && options.showFeedback && options.conversationId) {
-                addFeedbackButtons(messageEl, options.conversationId);
-            }
-            
-            return messageEl;
+                    if (content instanceof HTMLElement) {
+                        messageEl.appendChild(content);
+                    } else {
+                        messageEl.appendChild(content);
+                    }
+        }
+        
+        container.appendChild(messageEl);
+        container.scrollTop = container.scrollHeight;
+        
+        // 信頼度スコア表示
+        if (sender === 'bot' && options.confidence !== undefined) {
+            const confidenceEl = document.createElement('div');
+            confidenceEl.style.fontSize = '11px';
+            confidenceEl.style.color = '#6c757d';
+            confidenceEl.style.marginTop = '6px';
+            confidenceEl.style.fontStyle = 'italic';
+            confidenceEl.textContent = `信頼度: ${Math.round(options.confidence * 100)}%`;
+            messageEl.appendChild(confidenceEl);
+        }
+        
+        // フィードバックボタン追加
+        if (sender === 'bot' && options.showFeedback && options.conversationId) {
+            addFeedbackButtons(messageEl, options.conversationId);
+        }
+        
+        return messageEl;
         }
 
         function addFeedbackButtons(messageEl, conversationId) {
@@ -736,22 +739,17 @@
                 const chatContainer = document.getElementById('chat');
                 
                 // Bot応答のコンテナを作成
-                const botContent = document.createElement('div');
-                
-                // メッセージテキスト
-                const messageText = document.createElement('div');
-                messageText.textContent = data.message;
-                botContent.appendChild(messageText);
-                
-                // アクションボタンを追加
-                if (data.show_inquiry_button || data.show_more_questions) {
-                    botContent.appendChild(createActionButtons(data.show_inquiry_button, data.show_more_questions));
-                }
-                
-                addMessage(chatContainer, botContent, 'bot', {
+                addMessage(chatContainer, data.message, 'bot', {
                     showFeedback: true,
                     conversationId: currentConversationId
                 });
+
+                // アクションボタンを別途追加
+                if (data.show_inquiry_button || data.show_more_questions) {
+                    const actionContainer = document.createElement('div');
+                    actionContainer.appendChild(createActionButtons(data.show_inquiry_button, data.show_more_questions));
+                    addMessage(chatContainer, actionContainer, 'bot');
+                }
                 
             } catch (error) {
                 typingIndicator.hide();
