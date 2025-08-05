@@ -1,7 +1,7 @@
-# src/app.py - 最終修正版
+# src/app.py - 対話フロー対応版
 
 """
-PIP-Maker チャットボット Phase 1.5.1 - 最終修正版
+PIP-Maker チャットボット Phase 1.5.1 - 対話フロー対応版
 """
 
 import csv
@@ -42,7 +42,7 @@ except ImportError as e:
     
     # フォールバック設定（緊急用）
     class FallbackSettings:
-        csv_file_path = "src/qa_data.csv"  # 🔧 正しいパスに修正
+        csv_file_path = "src/qa_data.csv"
         app_name = "PIP‑Maker Chat API"
         app_version = "1.5.1"
         search_similarity_threshold = 0.1
@@ -74,8 +74,126 @@ except ImportError as e:
             
         async def get_welcome_message(self):
             return {
-                "message": "こんにちは！PIP-Makerについてのご質問をお気軽にどうぞ。",
-                "type": "welcome"
+                "message": "こんにちは！PIP-Maker HPにお越しいただきありがとうございます。\n興味があることを以下から選んでください。",
+                "type": "category_selection",
+                "categories": [
+                    {
+                        "id": "about", 
+                        "name": "💡 PIP-Makerとは？",
+                        "description": "PIP-Makerの基本的な概要と特徴について説明します。"
+                    },
+                    {
+                        "id": "cases", 
+                        "name": "📈 PIP-Makerの導入事例",
+                        "description": "実際の導入事例と成功例をご紹介します。"
+                    },
+                    {
+                        "id": "features", 
+                        "name": "⚙️ PIP-Makerの機能",
+                        "description": "PIP-Makerの主要機能と使い方について説明します。"
+                    },
+                    {
+                        "id": "pricing", 
+                        "name": "💰 PIP-Makerの料金プラン / ライセンスルール",
+                        "description": "料金体系とライセンス情報についてご案内します。"
+                    },
+                    {
+                        "id": "other", 
+                        "name": "❓ その他",
+                        "description": "上記以外のご質問やご相談についてお答えします。"
+                    }
+                ]
+            }
+            
+        async def select_category(self, conversation_id, category_id):
+            category_names = {
+                "about": "PIP-Makerとは？",
+                "cases": "PIP-Makerの導入事例", 
+                "features": "PIP-Makerの機能",
+                "pricing": "PIP-Makerの料金プラン / ライセンスルール",
+                "other": "その他"
+            }
+            
+            category_name = category_names.get(category_id, "選択されたカテゴリー")
+            
+            # 簡単なFAQリストを返す
+            faqs = []
+            if self.sheet_service:
+                try:
+                    data = await self.sheet_service.get_qa_data()
+                    for row in data:
+                        if (row.get('category', '').lower() == category_id.lower() and 
+                            row.get('notes') == 'よくある質問' and 
+                            row.get('faq_id')):
+                            faqs.append({
+                                "id": row["faq_id"],
+                                "question": row["question"],
+                                "answer": row.get("answer", "")
+                            })
+                except Exception as e:
+                    LOGGER.error(f"FAQ取得エラー: {e}")
+            
+            return {
+                "message": f"{category_name}についてのご質問ですね。\n\nよくあるご質問から選択するか、直接ご質問をご入力ください。",
+                "type": "faq_selection",
+                "category": {
+                    "id": category_id,
+                    "name": category_name,
+                    "description": f"{category_name}に関する情報"
+                },
+                "faqs": faqs,
+                "show_inquiry_button": True
+            }
+            
+        async def select_faq(self, conversation_id, faq_id):
+            if self.sheet_service:
+                try:
+                    data = await self.sheet_service.get_qa_data()
+                    for row in data:
+                        if row.get('faq_id') == faq_id:
+                            return {
+                                "message": row["answer"],
+                                "type": "faq_answer",
+                                "faq_id": faq_id,
+                                "source": row.get("source"),
+                                "show_inquiry_button": True,
+                                "show_more_questions": True
+                            }
+                except Exception as e:
+                    LOGGER.error(f"FAQ選択エラー: {e}")
+            
+            return {
+                "message": "申し訳ございません。FAQ情報の取得に失敗しました。",
+                "type": "error",
+                "show_inquiry_button": True
+            }
+            
+        async def submit_inquiry(self, conversation_id, form_data):
+            # バリデーション
+            required_fields = ['name', 'company', 'email', 'inquiry']
+            missing_fields = []
+            for field in required_fields:
+                if not form_data.get(field, '').strip():
+                    missing_fields.append(field)
+            
+            if missing_fields:
+                field_names = {
+                    'name': 'お名前',
+                    'company': '会社名', 
+                    'email': 'メールアドレス',
+                    'inquiry': 'お問い合わせ内容'
+                }
+                missing_names = [field_names.get(field, field) for field in missing_fields]
+                raise ValueError(f"以下の必須項目が入力されていません: {', '.join(missing_names)}")
+            
+            # お問い合わせIDを生成
+            inquiry_id = f"INQ_{conversation_id}_{int(datetime.now().timestamp())}"
+            
+            return {
+                "message": "お問合せありがとうございました！担当者からお返事いたしますので、少々お待ちください。",
+                "type": "inquiry_completed",
+                "inquiry_id": inquiry_id,
+                "estimated_response_time": "1営業日以内"
             }
             
         def get_conversation_context(self, conversation_id):
@@ -298,9 +416,9 @@ feedback_service = FeedbackService(slack_service)
 app_name = getattr(settings, 'app_name', 'PIP‑Maker Chat API')
 app_version = getattr(settings, 'app_version', '1.5.1')
 app = FastAPI(
-    title=f"{app_name} (最終修正版)", 
+    title=f"{app_name} (対話フロー対応版)", 
     version=app_version,
-    description="Render環境最終対応版"
+    description="対話フロー機能完全対応版"
 )
 
 # 例外ハンドラー
@@ -382,9 +500,10 @@ async def health() -> Dict[str, Any]:
     return {
         "status": "ok", 
         "version": app_version,
-        "phase": "1.5.1-final-fix",
+        "phase": "1.5.1-conversation-flow",
         "data_service": type(data_service).__name__ if data_service else "None",
         "search_service": type(search_service).__name__ if search_service else "None",
+        "conversation_flow_service": type(conversation_flow_service).__name__ if conversation_flow_service else "None",
         "csv_path": csv_path,
         "csv_exists": os.path.exists(csv_path) if csv_path != 'unknown' else False,
         "csv_absolute_path": os.path.abspath(csv_path) if csv_path != 'unknown' else 'unknown'
@@ -443,7 +562,7 @@ async def feedback_endpoint(feedback: FeedbackRequest) -> Dict[str, str]:
     
     return {"status": "received"}
 
-# 🔧 対話フロー用エンドポイント（安全性チェック付き）
+# 🔧 対話フロー用エンドポイント（完全実装）
 @app.get("/api/conversation/welcome")
 async def get_welcome_message() -> Dict[str, Any]:
     """初期の歓迎メッセージとカテゴリー選択肢を返す"""
@@ -461,6 +580,88 @@ async def get_welcome_message() -> Dict[str, Any]:
             "message": "こんにちは！PIP-Makerについてのご質問をお気軽にどうぞ。",
             "type": "welcome_fallback"
         }
+
+@app.post("/api/conversation/category")
+async def select_category_endpoint(request: CategorySelectionRequest) -> Dict[str, Any]:
+    """カテゴリー選択処理"""
+    if not conversation_flow_service:
+        raise HTTPException(status_code=500, detail="対話フローサービスが利用できません")
+    
+    try:
+        LOGGER.info(f"カテゴリー選択: {request.category_id} (会話ID: {request.conversation_id})")
+        
+        result = await conversation_flow_service.select_category(
+            request.conversation_id, 
+            request.category_id
+        )
+        
+        LOGGER.info(f"カテゴリー選択処理完了: {request.category_id}")
+        return result
+        
+    except ValueError as exc:
+        LOGGER.error(f"カテゴリー選択バリデーションエラー: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        LOGGER.error(f"カテゴリー選択処理エラー: {exc}")
+        import traceback
+        LOGGER.error(f"スタックトレース: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="カテゴリー選択でエラーが発生しました。もう一度お試しください。")
+
+@app.post("/api/conversation/faq")
+async def select_faq_endpoint(request: FAQSelectionRequest) -> Dict[str, Any]:
+    """FAQ選択処理"""
+    if not conversation_flow_service:
+        raise HTTPException(status_code=500, detail="対話フローサービスが利用できません")
+    
+    try:
+        LOGGER.info(f"FAQ選択: {request.faq_id} (会話ID: {request.conversation_id})")
+        
+        result = await conversation_flow_service.select_faq(
+            request.conversation_id,
+            request.faq_id
+        )
+        
+        # Slack通知
+        await slack_service.notify_faq_selection(
+            faq_id=request.faq_id,
+            question=result.get("message", "")[:100],
+            category="unknown"
+        )
+        
+        return result
+        
+    except ValueError as exc:
+        LOGGER.error(f"FAQ選択バリデーションエラー: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        LOGGER.error(f"FAQ選択処理エラー: {exc}")
+        raise HTTPException(status_code=500, detail="FAQ選択でエラーが発生しました。もう一度お試しください。")
+
+@app.post("/api/conversation/inquiry")
+async def submit_inquiry_endpoint(request: InquirySubmissionRequest) -> Dict[str, Any]:
+    """お問い合わせ送信処理"""
+    if not conversation_flow_service:
+        raise HTTPException(status_code=500, detail="対話フローサービスが利用できません")
+    
+    try:
+        LOGGER.info(f"お問い合わせ送信: (会話ID: {request.conversation_id})")
+        
+        result = await conversation_flow_service.submit_inquiry(
+            request.conversation_id,
+            request.form_data
+        )
+        
+        # Slack通知
+        await slack_service.notify_inquiry_submission(request.form_data)
+        
+        return result
+        
+    except ValueError as exc:
+        LOGGER.error(f"お問い合わせバリデーションエラー: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        LOGGER.error(f"お問い合わせ送信処理エラー: {exc}")
+        raise HTTPException(status_code=500, detail="お問い合わせ送信でエラーが発生しました。もう一度お試しください。")
 
 # デバッグエンドポイント
 @app.get("/debug/status")
@@ -493,64 +694,3 @@ static_paths_to_try = [
     project_root / "static",
     project_root / "src" / "static",
 ]
-
-static_mounted = False
-for static_path in static_paths_to_try:
-    if static_path.exists():
-        app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
-        LOGGER.info(f"✅ Static files mounted from: {static_path}")
-        static_mounted = True
-        break
-
-if not static_mounted:
-    LOGGER.warning("⚠️ 静的ファイルディレクトリが見つかりません")
-
-# アプリケーション起動時の初期化
-@app.on_event("startup")
-async def startup_event():
-    """アプリケーション起動時の初期化処理"""
-    LOGGER.info("=== PIP-Maker Chatbot Phase 1.5.1 起動 (最終修正版) ===")
-    
-    # 🔧 デバッグ情報出力
-    csv_path = getattr(settings, 'csv_file_path', 'unknown')
-    LOGGER.info(f"作業ディレクトリ: {os.getcwd()}")
-    LOGGER.info(f"CSVパス設定: {csv_path}")
-    LOGGER.info(f"CSV絶対パス: {os.path.abspath(csv_path) if csv_path != 'unknown' else 'unknown'}")
-    LOGGER.info(f"CSV存在確認: {os.path.exists(csv_path) if csv_path != 'unknown' else False}")
-    
-    # ディレクトリ内容確認
-    LOGGER.info("📁 ディレクトリ内容:")
-    for item in os.listdir('.'):
-        LOGGER.info(f"  {item}")
-    
-    # srcディレクトリ内容確認
-    if os.path.exists('./src'):
-        LOGGER.info("📁 src ディレクトリ内容:")
-        for item in os.listdir('./src'):
-            LOGGER.info(f"  src/{item}")
-    
-    if data_service:
-        try:
-            data = await data_service.get_qa_data()
-            LOGGER.info(f"✅ Q&Aデータ: {len(data)}件を読み込み完了")
-            
-            # サンプルデータを表示
-            if data:
-                sample = data[0]
-                LOGGER.info(f"サンプルデータ: {sample.get('question', 'N/A')[:50]}...")
-                
-        except Exception as e:
-            LOGGER.error(f"❌ データ読み込みエラー: {e}")
-            # エラー詳細を表示
-            import traceback
-            LOGGER.error(f"エラー詳細: {traceback.format_exc()}")
-    else:
-        LOGGER.warning("⚠️ データサービスが初期化されていません")
-    
-    LOGGER.info(f"Slack 通知: {'有効' if slack_service.enabled else '無効'}")
-
-# デバッグ情報出力
-if getattr(settings, 'debug', False):
-    LOGGER.info("=== デバッグモード (最終修正版) ===")
-    if hasattr(settings, 'debug_settings'):
-        settings.debug_settings()
