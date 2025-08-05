@@ -1,5 +1,5 @@
 """
-PIP-Maker チャットボットの設定管理（Google Sheets対応版）
+PIP-Maker チャットボットの設定管理（Render対応修正版）
 """
 
 import os
@@ -13,17 +13,17 @@ class Settings(BaseSettings):
     
     # アプリケーション基本設定
     app_name: str = Field(default="PIP-Maker Chat API", alias="APP_NAME")
-    app_version: str = Field(default="1.5.1", alias="APP_VERSION")  # Google Sheets対応版
+    app_version: str = Field(default="1.5.1", alias="APP_VERSION")
     debug: bool = Field(default=False, alias="DEBUG")
     
     # サーバー設定
     host: str = Field(default="127.0.0.1", alias="HOST")
     port: int = Field(default=8000, alias="PORT")
     
-    # データソース設定
-    csv_file_path: str = Field(default="qa_data.csv", alias="CSV_FILE_PATH")
+    # データソース設定 - 🔧 Render対応パス修正
+    csv_file_path: str = Field(default="../qa_data.csv", alias="CSV_FILE_PATH")
     
-    # Google Sheets設定（Phase 1.5.1で追加）
+    # Google Sheets設定
     google_sheets_enabled: bool = Field(default=False, alias="GOOGLE_SHEETS_ENABLED")
     google_sheets_id: Optional[str] = Field(default=None, alias="GOOGLE_SHEETS_ID")
     google_credentials_path: Optional[str] = Field(default=None, alias="GOOGLE_CREDENTIALS_PATH")
@@ -42,13 +42,13 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = Field(default=10, alias="RATE_LIMIT_PER_MINUTE")
     
     # キャッシュ設定
-    cache_ttl_seconds: int = Field(default=300, alias="CACHE_TTL_SECONDS")  # 5分
+    cache_ttl_seconds: int = Field(default=300, alias="CACHE_TTL_SECONDS")
     
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False
-        extra = "ignore"  # 🔧 追加: 未定義のフィールドを無視
+        extra = "ignore"
         
     @property
     def is_google_sheets_configured(self) -> bool:
@@ -75,41 +75,24 @@ class Settings(BaseSettings):
         
     def debug_settings(self):
         """デバッグ用：設定値を表示"""
-        print("=== 設定値デバッグ（Google Sheets対応版）===")
+        print("=== 設定値デバッグ（Render対応版）===")
         print(f"current directory: {os.getcwd()}")
-        print(f"env_file path: {os.path.abspath('.env')}")
-        print(f"env_file exists: {os.path.exists('.env')}")
-        print(f"app_name: {self.app_name}")
-        print(f"app_version: {self.app_version}")
-        print(f"debug: {self.debug}")
         print(f"csv_file_path: {self.csv_file_path}")
-        print(f"google_sheets_enabled: {self.google_sheets_enabled}")
-        print(f"google_sheets_id: {self.google_sheets_id}")
-        print(f"google_credentials_path: {self.google_credentials_path}")
-        print(f"is_google_sheets_configured: {self.is_google_sheets_configured}")
-        print(f"slack_webhook_url: {'設定済み' if self.slack_webhook_url else '未設定'}")
+        print(f"csv_file_path (abs): {os.path.abspath(self.csv_file_path)}")
+        print(f"csv_file_exists: {os.path.exists(self.csv_file_path)}")
         
-        if self.google_credentials_path:
-            print(f"credentials file exists: {os.path.exists(self.google_credentials_path)}")
-        
-        if os.path.exists('.env'):
-            print(f"\n.env file content (sensitive info masked):")
-            try:
-                with open('.env', 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    # 機密情報をマスク
-                    lines = content.split('\n')
-                    for line in lines:
-                        if any(sensitive in line.upper() for sensitive in ['WEBHOOK', 'KEY', 'SECRET', 'TOKEN']):
-                            if '=' in line:
-                                key, _ = line.split('=', 1)
-                                print(f"{key}=***MASKED***")
-                        else:
-                            print(line)
-            except Exception as e:
-                print(f"Error reading .env: {e}")
-        else:
-            print("\n.env file not found!")
+        # 🔧 ディレクトリ構造をチェック
+        current_dir = os.getcwd()
+        print(f"\n📁 Directory structure:")
+        for item in os.listdir(current_dir):
+            item_path = os.path.join(current_dir, item)
+            if os.path.isfile(item_path):
+                print(f"  📄 {item}")
+            else:
+                print(f"  📁 {item}/")
+                if item == 'src':
+                    for sub_item in os.listdir(item_path):
+                        print(f"    📄 {sub_item}")
 
 
 # グローバル設定インスタンス
@@ -121,21 +104,28 @@ def get_settings() -> Settings:
     return settings
 
 
-# データサービスファクトリー関数
+# データサービスファクトリー関数 - 🔧 インポート修正
 def create_data_service():
     """設定に基づいて適切なデータサービスを作成"""
-    from src.google_sheets_service import GoogleSheetsService
-    from src.enhanced_sheet_service import EnhancedGoogleSheetsService
-    
-    if settings.is_google_sheets_configured:
-        # Google Sheets統合サービスを使用
-        return GoogleSheetsService(
-            spreadsheet_id=settings.google_sheets_id,
-            credentials_path=settings.google_credentials_path,
-            fallback_csv_path=settings.csv_file_path
-        )
-    else:
-        # 従来のCSVサービスを使用
+    try:
+        from .google_sheets_service import GoogleSheetsService
+        from .enhanced_sheet_service import EnhancedGoogleSheetsService
+        
+        if settings.is_google_sheets_configured:
+            # Google Sheets統合サービスを使用
+            return GoogleSheetsService(
+                spreadsheet_id=settings.google_sheets_id,
+                credentials_path=settings.google_credentials_path,
+                fallback_csv_path=settings.csv_file_path
+            )
+        else:
+            # 従来のCSVサービスを使用
+            return EnhancedGoogleSheetsService(settings.csv_file_path)
+            
+    except ImportError as e:
+        print(f"⚠️ Import error in create_data_service: {e}")
+        # フォールバック実装
+        from enhanced_sheet_service import EnhancedGoogleSheetsService
         return EnhancedGoogleSheetsService(settings.csv_file_path)
 
 
