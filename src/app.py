@@ -19,6 +19,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from .error_handling import (
+    ChatBotException, 
+    DataSourceException, 
+    SearchException, 
+    ConversationFlowException,
+    chatbot_exception_handler,
+    general_exception_handler,
+)
 
 LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -306,11 +314,11 @@ class SlackNotificationService:
         LOGGER.info(f"[Slack] 📊 データソース変更: {source_type} - {status}")
 
 class SearchService:
-    """Q&Aデータに対してファジー検索を実行するサービス"""
+    """Q&Aデータに対してファジー検索を実行するサービス（エラーハンドリング強化版）"""
 
-    def __init__(self, data_service) -> None:
+    def __init__(self, data_service) -> None:  # 🔧 data_service パラメータを追加
         self.data_service = data_service
-        self.similarity_threshold = getattr(settings, 'search_similarity_threshold', 0.1)
+        self.similarity_threshold = getattr(settings, 'search_similarity_threshold', 0.3)  # 0.1 → 0.3
 
     @staticmethod
     def _similarity(a: str, b: str) -> float:
@@ -323,44 +331,81 @@ class SearchService:
         category: Optional[str] = None,
         exclude_faqs: bool = False
     ) -> SearchResponse:
-        """検索を実行"""
+        """検索を実行（最終修正版）"""
+        
+        # データ取得時のエラーハンドリング
         try:
             data = await self.data_service.get_qa_data()
         except Exception as e:
-            raise SearchException(f"データ取得エラー: {str(e)}")
+            raise DataSourceException(
+                f"Q&Aデータの取得に失敗しました",
+                source_type=type(self.data_service).__name__
+            ) from e
         
+        # データ検証
         if not data:
-            raise SearchException("Q&Aデータが空です。")
+            raise DataSourceException(
+                "Q&Aデータが空です。データソースを確認してください。",
+                source_type=type(self.data_service).__name__
+            )
 
         query_norm = query.strip().lower()
+        if not query_norm:
+            raise SearchException(
+                "検索クエリが空です。質問を入力してください。",
+                query=query
+            )
+        
         best_match = None
         best_score = 0.0
         
-        for row in data:
-            # カテゴリーフィルター
-            if category and row.get('category'):
-                if row['category'].lower() != category.lower():
+        try:
+            for row in data:
+                # カテゴリーフィルター
+                if category and row.get('category'):
+                    if row['category'].lower() != category.lower():
+                        continue
+                
+                # FAQを除外する場合
+                if exclude_faqs and row.get('notes') == 'よくある質問':
                     continue
-            
-            # FAQを除外する場合
-            if exclude_faqs and row.get('notes') == 'よくある質問':
-                continue
-                
-            question = row.get('question', '')
-            if not question:
-                continue
-                
-            score = self._similarity(query_norm, question.lower())
-            if score > best_score:
-                best_match = row
-                best_score = score
+                    
+                question = row.get('question', '')
+                if not question:
+                    continue
+                    
+                score = self._similarity(query_norm, question.lower())
+                if score > best_score:
+                    best_match = row
+                    best_score = score
+        except Exception as e:
+            raise SearchException(
+                f"検索処理中にエラーが発生しました: {str(e)}",
+                query=query
+            ) from e
 
+        # 🔧 3. より適切な結果検証
         if not best_match or best_score < self.similarity_threshold:
-            raise SearchException("該当する回答が見つかりませんでした。より具体的なキーワードでお試しください。")
+            # 類似度が低い場合の具体的なメッセージ
+            if best_match and best_score > 0.1:
+                # 少し関連性はあるが信頼度が低い場合
+                raise SearchException(
+                    f"関連する情報は見つかりましたが、確信度が低いため回答できません。より具体的なキーワードでお試しいただくか、お問い合わせフォームからご連絡ください。",
+                    query=query
+                )
+            else:
+                # 全く関連性がない場合
+                raise SearchException(
+                    "該当する回答が見つかりませんでした。より具体的なキーワードでお試しいただくか、お問い合わせフォームからご連絡ください。",
+                    query=query
+                )
 
         answer = best_match.get('answer', '')
         if not answer:
             answer = "申し訳ございませんが、この質問に対する回答が登録されていません。お問い合わせフォームからご連絡ください。"
+        
+        # 🔧 4. ログ出力を追加（デバッグ用）
+        LOGGER.info(f"検索成功: クエリ='{query}', 類似度={best_score:.3f}, 質問='{best_match.get('question', '')[:50]}...'")
         
         return SearchResponse(
             answer=answer,
@@ -422,19 +467,8 @@ app = FastAPI(
 )
 
 # 例外ハンドラー
-@app.exception_handler(ChatBotException)
-async def chatbot_exception_handler(request: Request, exc: ChatBotException) -> JSONResponse:
-    """ChatBotExceptionとそのサブクラス用の統一エラーレスポンス"""
-    error_id = uuid.uuid4().hex
-    LOGGER.error("%s: %s [error_id=%s]", exc.__class__.__name__, exc, error_id)
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "システムエラーが発生しました。",
-            "fallback_message": "申し訳ございません。担当者までお問い合わせください。",
-            "error_id": error_id,
-        },
-    )
+app.add_exception_handler(ChatBotException, chatbot_exception_handler)
+app.add_exception_handler(Exception, general_exception_handler)
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -511,28 +545,66 @@ async def health() -> Dict[str, Any]:
 
 @app.post("/api/search", response_model=SearchResponse)
 async def search_endpoint(query: SearchQuery) -> SearchResponse:
-    """検索エンドポイント"""
+    """検索エンドポイント（最終版）"""
+    
+    # 🔧 1. 最初にサービスチェック
     if not search_service:
         raise ChatBotException("検索サービスが初期化されていません")
-        
+    
+    # 🔧 2. 最初にクエリバリデーション（例外処理の外で）
+    # この部分は SearchException として適切に処理される
+    if not query.question:
+        raise SearchException(
+            "質問を入力してください。",
+            query=""
+        )
+    
+    question_trimmed = query.question.strip()
+    if not question_trimmed:
+        raise SearchException(
+            "質問を入力してください。",
+            query=query.question
+        )
+    
+    if len(question_trimmed) < 2:
+        raise SearchException(
+            "もう少し詳しい質問を入力してください。",
+            query=question_trimmed
+        )
+    
+    # 🔧 3. SearchService を呼び出し
     try:
         result = await search_service.search(
-            query.question, 
+            question_trimmed,
             query.category,
             exclude_faqs=False
         )
-    except SearchException as exc:
-        raise ChatBotException(str(exc)) from exc
+    except SearchException:
+        # SearchException はそのまま再発生（適切なメッセージ付き）
+        raise
+    except DataSourceException:
+        # DataSourceException もそのまま再発生
+        raise
+    except Exception as exc:
+        # 予期しないエラーをログ出力してからChatBotExceptionでラップ
+        LOGGER.error(f"検索処理で予期しないエラー: {exc}")
+        raise ChatBotException(
+            "検索処理中に予期しないエラーが発生しました。"
+        ) from exc
     
-    # Slack通知
-    await slack_service.notify_chat_interaction(
-        question=query.question,
-        answer=result.answer,
-        confidence=result.confidence,
-        interaction_type="search"
-    )
+    # 🔧 4. Slack通知（エラーが発生しても検索結果に影響させない）
+    try:
+        await slack_service.notify_chat_interaction(
+            question=question_trimmed,
+            answer=result.answer,
+            confidence=result.confidence,
+            interaction_type="search"
+        )
+    except Exception as slack_error:
+        LOGGER.warning(f"Slack通知失敗: {slack_error}")
     
     return result
+
 
 @app.post("/api/feedback")
 async def feedback_endpoint(feedback: FeedbackRequest) -> Dict[str, str]:
@@ -583,9 +655,13 @@ async def get_welcome_message() -> Dict[str, Any]:
 
 @app.post("/api/conversation/category")
 async def select_category_endpoint(request: CategorySelectionRequest) -> Dict[str, Any]:
-    """カテゴリー選択処理"""
+    """カテゴリー選択処理（エラーハンドリング強化版）"""
     if not conversation_flow_service:
-        raise HTTPException(status_code=500, detail="対話フローサービスが利用できません")
+        raise ConversationFlowException(
+            "対話フローサービスが利用できません",
+            conversation_id=request.conversation_id,
+            state="service_unavailable"
+        )
     
     try:
         LOGGER.info(f"カテゴリー選択: {request.category_id} (会話ID: {request.conversation_id})")
@@ -599,19 +675,28 @@ async def select_category_endpoint(request: CategorySelectionRequest) -> Dict[st
         return result
         
     except ValueError as exc:
-        LOGGER.error(f"カテゴリー選択バリデーションエラー: {exc}")
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise ConversationFlowException(
+            f"カテゴリー選択でエラーが発生しました: {str(exc)}",
+            conversation_id=request.conversation_id,
+            state="category_selection"
+        ) from exc
     except Exception as exc:
         LOGGER.error(f"カテゴリー選択処理エラー: {exc}")
-        import traceback
-        LOGGER.error(f"スタックトレース: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail="カテゴリー選択でエラーが発生しました。もう一度お試しください。")
+        raise ConversationFlowException(
+            "カテゴリー選択でエラーが発生しました。もう一度お試しください。",
+            conversation_id=request.conversation_id,
+            state="category_selection"
+        ) from exc
 
 @app.post("/api/conversation/faq")
 async def select_faq_endpoint(request: FAQSelectionRequest) -> Dict[str, Any]:
-    """FAQ選択処理"""
+    """FAQ選択処理（エラーハンドリング強化版）"""
     if not conversation_flow_service:
-        raise HTTPException(status_code=500, detail="対話フローサービスが利用できません")
+        raise ConversationFlowException(
+            "対話フローサービスが利用できません",
+            conversation_id=request.conversation_id,
+            state="service_unavailable"
+        )
     
     try:
         LOGGER.info(f"FAQ選択: {request.faq_id} (会話ID: {request.conversation_id})")
@@ -631,11 +716,18 @@ async def select_faq_endpoint(request: FAQSelectionRequest) -> Dict[str, Any]:
         return result
         
     except ValueError as exc:
-        LOGGER.error(f"FAQ選択バリデーションエラー: {exc}")
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise ConversationFlowException(
+            f"FAQ選択でエラーが発生しました: {str(exc)}",
+            conversation_id=request.conversation_id,
+            state="faq_selection"
+        ) from exc
     except Exception as exc:
         LOGGER.error(f"FAQ選択処理エラー: {exc}")
-        raise HTTPException(status_code=500, detail="FAQ選択でエラーが発生しました。もう一度お試しください。")
+        raise ConversationFlowException(
+            "FAQ選択でエラーが発生しました。もう一度お試しください。",
+            conversation_id=request.conversation_id,
+            state="faq_selection"
+        ) from exc
 
 @app.post("/api/conversation/inquiry")
 async def submit_inquiry_endpoint(request: InquirySubmissionRequest) -> Dict[str, Any]:

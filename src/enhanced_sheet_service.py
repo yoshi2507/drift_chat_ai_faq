@@ -10,6 +10,7 @@ import logging
 import os
 from typing import Dict, List, Optional
 from datetime import datetime
+from .error_handling import DataSourceException
 
 LOGGER = logging.getLogger(__name__)
 
@@ -97,51 +98,74 @@ class EnhancedGoogleSheetsService:
         return elapsed < self.cache_ttl_seconds
 
     async def get_qa_data(self, force_refresh: bool = False) -> List[Dict[str, str]]:
-        """Q&Aデータを取得（キャッシュ機能付き）"""
-        
+        """Q&Aデータを取得（エラーハンドリング強化版）"""
+    
         # キャッシュが有効な場合はそれを返す
         if not force_refresh and self._is_cache_valid():
             LOGGER.debug(f"キャッシュからQ&Aデータを返却: {len(self._cache)}件")
             return self._cache
-        
+    
         try:
             # CSVファイルの存在確認
             if not os.path.exists(self.csv_path):
                 # 🔧 存在しない場合は再度パス解決を試行
                 LOGGER.warning(f"CSVファイルが見つかりません: {self.csv_path}")
                 self.csv_path = self._resolve_csv_path(self.csv_path)
-                
-                if not os.path.exists(self.csv_path):
-                    raise SheetAccessException(f"CSVファイルが見つかりません: {self.csv_path}")
             
+                if not os.path.exists(self.csv_path):
+                    raise DataSourceException(
+                        f"CSVファイルが見つかりません: {self.csv_path}",
+                        source_type="CSV"
+                    )
+        
             with open(self.csv_path, newline='', encoding='utf-8') as fp:
                 reader = csv.DictReader(fp)
                 rows = []
-                
+            
                 for row_num, row in enumerate(reader, start=2):  # ヘッダーを考慮して2から開始
                     # 空行をスキップ
                     if not any(value.strip() for value in row.values()):
                         continue
-                        
+                    
                     try:
                         normalized_row = self._normalize_row(row)
                         rows.append(normalized_row)
                     except Exception as e:
                         LOGGER.warning(f"行 {row_num} の処理でエラー: {e}")
                         continue
-                
+            
+                if not rows:
+                    raise DataSourceException(
+                        "CSVファイルにデータが含まれていません",
+                        source_type="CSV"
+                    )
+            
                 self._cache = rows
                 self._cache_timestamp = datetime.now()
-                
+            
                 LOGGER.info(f"{self.csv_path} から {len(self._cache)} 件のQ&Aエントリを読み込みました")
                 return self._cache
-                
+            
         except FileNotFoundError as exc:
-            raise SheetAccessException(f"CSVファイルが見つかりません: {self.csv_path}") from exc
+            raise DataSourceException(
+                f"CSVファイルが見つかりません: {self.csv_path}",
+                source_type="CSV"
+            ) from exc
         except UnicodeDecodeError as exc:
-            raise SheetAccessException(f"CSVファイルの文字エンコーディングエラー: {exc}") from exc
+            raise DataSourceException(
+                f"CSVファイルの文字エンコーディングエラー: {exc}",
+                source_type="CSV"
+            ) from exc
+        except PermissionError as exc:
+            raise DataSourceException(
+                f"CSVファイルへのアクセス権限がありません: {self.csv_path}",
+                source_type="CSV"
+            ) from exc
         except Exception as exc:
-            raise SheetAccessException(f"CSVファイルの読み込みに失敗しました: {exc}") from exc
+            raise DataSourceException(
+                f"CSVファイルの読み込みに失敗しました: {exc}",
+                source_type="CSV"
+            ) from exc
 
     async def get_faqs_by_category(self, category: str) -> List[Dict[str, str]]:
         """カテゴリー別のFAQを取得"""

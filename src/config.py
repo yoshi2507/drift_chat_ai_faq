@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     slack_webhook_url: Optional[str] = Field(default=None, alias="SLACK_WEBHOOK_URL")
     
     # 検索設定
-    search_similarity_threshold: float = Field(default=0.1, alias="SEARCH_SIMILARITY_THRESHOLD")
+    search_similarity_threshold: float = Field(default=0.3, alias="SEARCH_SIMILARITY_THRESHOLD")  # 0.1 → 0.3
     
     # ログ設定
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
