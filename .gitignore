@@ -24,6 +24,7 @@ MANIFEST
 # Virtual environments
 .env
 .env.txt
+.env*
 .venv
 env/
 venv/
