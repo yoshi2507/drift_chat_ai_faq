@@ -10,6 +10,9 @@ import logging
 import uuid
 import os
 import sys
+import aiohttp
+import asyncio
+import json
 from difflib import SequenceMatcher
 from typing import Dict, List, Optional, Any
 from pathlib import Path
@@ -212,16 +215,67 @@ class FeedbackRequest(BaseModel):
 
 # Slack通知サービス
 class SlackNotificationService:
-    """Slack通知送信用のサービス（AI対応版）"""
+    """Slack通知送信用のサービス（実際の送信機能付き）"""
 
     def __init__(self, webhook_url: Optional[str] = None) -> None:
         self.webhook_url = webhook_url
         self.enabled = bool(webhook_url)
         
+        # 通知統計（デバッグ用）
+        self.notification_count = 0
+        self.successful_notifications = 0
+        self.failed_notifications = 0
+        self.last_notification_time = None
+        
         if self.enabled:
-            LOGGER.info(f"Slack通知サービス: 有効")
+            LOGGER.info(f"✅ Slack通知サービス: 有効")
+            LOGGER.info(f"   Webhook URL: {webhook_url[:50]}...")
         else:
-            LOGGER.info("Slack通知サービス: 無効 (Webhook URLが設定されていません)")
+            LOGGER.info("⚠️ Slack通知サービス: 無効 (Webhook URLが設定されていません)")
+
+    async def _send_to_slack(self, message: dict) -> bool:
+        """Slackにメッセージを実際に送信"""
+        if not self.enabled:
+            LOGGER.debug("Slack通知: 無効のためスキップ")
+            return False
+        
+        self.notification_count += 1
+        
+        try:
+            LOGGER.info(f"📤 Slack通知送信開始 (#{self.notification_count})")
+            
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    self.webhook_url,
+                    json=message,
+                    headers={'Content-Type': 'application/json'}
+                ) as response:
+                    status = response.status
+                    response_text = await response.text()
+                    
+                    if status == 200:
+                        self.successful_notifications += 1
+                        self.last_notification_time = datetime.now()
+                        LOGGER.info(f"✅ Slack通知送信成功 (#{self.notification_count})")
+                        return True
+                    else:
+                        self.failed_notifications += 1
+                        LOGGER.error(f"❌ Slack通知送信失敗 (#{self.notification_count}) - HTTP {status}: {response_text}")
+                        return False
+                        
+        except asyncio.TimeoutError:
+            self.failed_notifications += 1
+            LOGGER.error(f"⏰ Slack通知タイムアウト (#{self.notification_count})")
+            return False
+        except aiohttp.ClientConnectorError as e:
+            self.failed_notifications += 1
+            LOGGER.error(f"🔌 Slack通知接続エラー (#{self.notification_count}): {e}")
+            return False
+        except Exception as e:
+            self.failed_notifications += 1
+            LOGGER.error(f"❌ Slack通知予期しないエラー (#{self.notification_count}): {e}")
+            return False
 
     async def notify_chat_interaction(
         self,
@@ -234,26 +288,180 @@ class SlackNotificationService:
         category: str = "unknown",
         sources_used: List[str] = []
     ) -> None:
-        """チャット対話の通知（AI情報付き）"""
+        """チャット対話の通知（実際の送信機能付き）"""
+        
+        # ログ出力（従来通り）
         ai_info = "🤖 AI生成" if ai_generated else "📊 データベース"
         sources_info = f"({len(sources_used)}件のソース)" if sources_used else ""
         
         LOGGER.info(
-            "[Slack] %s %s: question=%s, answer=%.50s..., confidence=%.2f, category=%s %s",
-            ai_info,
-            interaction_type,
-            question,
-            answer,
-            confidence,
-            category,
-            sources_info
+            f"[Slack] {ai_info} {interaction_type}: question={question[:50]}{'...' if len(question) > 50 else ''}, "
+            f"answer={answer[:50]}{'...' if len(answer) > 50 else ''}, confidence={confidence:.2f}, "
+            f"category={category} {sources_info}"
         )
+        
+        if not self.enabled:
+            return
+        
+        # 実際のSlackメッセージを構築・送信
+        try:
+            # 信頼度の色分け
+            confidence_color = "#28a745" if confidence >= 0.8 else "#ffc107" if confidence >= 0.6 else "#dc3545"
+            
+            message = {
+                "attachments": [
+                    {
+                        "color": confidence_color,
+                        "blocks": [
+                            {
+                                "type": "header",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": f"🗨️ 新しいチャット対話 {ai_info}"
+                                }
+                            },
+                            {
+                                "type": "section",
+                                "fields": [
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": f"*🙋 質問:*\n{question[:200]}{'...' if len(question) > 200 else ''}"
+                                    },
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": f"*🤖 回答:*\n{answer[:300]}{'...' if len(answer) > 300 else ''}"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "section",
+                                "fields": [
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": f"*📊 信頼度:* {confidence:.0%}"
+                                    },
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": f"*🏷️ カテゴリー:* {category}"
+                                    },
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": f"*🔍 検索タイプ:* {interaction_type}"
+                                    },
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": f"*📚 ソース:* {len(sources_used)}件"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "context",
+                                "elements": [
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+            
+            success = await self._send_to_slack(message)
+            
+            if success:
+                LOGGER.info("✅ チャット対話のSlack通知が正常に送信されました")
+            else:
+                LOGGER.warning("⚠️ チャット対話のSlack通知送信に失敗しました")
+                
+        except Exception as e:
+            LOGGER.error(f"❌ チャット対話通知処理でエラー: {e}")
 
-    async def notify_ai_service_status(self, service_name: str, status: str, details: Dict = None) -> None:
-        """AIサービス状態変更の通知"""
-        LOGGER.info(f"[Slack] 🤖 AIサービス状態: {service_name} - {status}")
-        if details:
-            LOGGER.info(f"[Slack] 詳細: {details}")
+    async def notify_inquiry_submission(self, inquiry_data: Dict[str, str]) -> None:
+        """お問い合わせ送信時の通知（実際の送信機能付き）"""
+        try:
+            company = inquiry_data.get('company', '')
+            name = inquiry_data.get('name', '')
+            email = inquiry_data.get('email', '')
+            inquiry = inquiry_data.get('inquiry', '')
+            
+            # ログ出力（従来通り）
+            LOGGER.info(f"[Slack] 🔥 新しいお問い合わせ: {name} ({company}) - {email}")
+            LOGGER.info(f"[Slack] 内容: {inquiry[:100]}{'...' if len(inquiry) > 100 else ''}")
+            
+            if not self.enabled:
+                return
+            
+            # 重要度の高い通知なので目立つデザイン
+            message = {
+                "attachments": [
+                    {
+                        "color": "#ff6b35",  # オレンジ色（重要）
+                        "blocks": [
+                            {
+                                "type": "header",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "🔥 新しいお問い合わせが届きました！"
+                                }
+                            },
+                            {
+                                "type": "section",
+                                "fields": [
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": f"*👤 お名前:*\n{name}"
+                                    },
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": f"*🏢 会社名:*\n{company}"
+                                    },
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": f"*📧 メール:*\n{email}"
+                                    },
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": f"*⏰ 受信時刻:*\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"*💬 お問い合わせ内容:*\n```{inquiry}```"
+                                }
+                            },
+                            {
+                                "type": "actions",
+                                "elements": [
+                                    {
+                                        "type": "button",
+                                        "text": {
+                                            "type": "plain_text",
+                                            "text": "📧 メールで返信"
+                                        },
+                                        "url": f"mailto:{email}?subject=Re: PIP-Makerについてのお問い合わせ",
+                                        "style": "primary"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+            
+            success = await self._send_to_slack(message)
+            
+            if success:
+                LOGGER.info("✅ お問い合わせのSlack通知が正常に送信されました")
+            else:
+                LOGGER.warning("⚠️ お問い合わせのSlack通知送信に失敗しました")
+                
+        except Exception as e:
+            LOGGER.error(f"❌ お問い合わせ通知処理でエラー: {e}")
 
     async def notify_faq_selection(
         self, 
@@ -263,27 +471,139 @@ class SlackNotificationService:
         user_info: Optional[Dict[str, str]] = None
     ) -> None:
         """FAQ選択の通知"""
-        LOGGER.info(
-            "[Slack] FAQ選択: faq_id=%s, category=%s, question=%s",
-            faq_id, category, question
-        )
-
-    async def notify_inquiry_submission(self, inquiry_data: Dict[str, str]) -> None:
-        """お問い合わせ送信時の通知"""
-        company = inquiry_data.get('company', '')
-        name = inquiry_data.get('name', '')
-        email = inquiry_data.get('email', '')
-        inquiry = inquiry_data.get('inquiry', '')
+        LOGGER.info(f"[Slack] FAQ選択: faq_id={faq_id}, category={category}, question={question}")
         
-        LOGGER.info(
-            "[Slack] 🔥 新しいお問い合わせ: %s (%s) - %s",
-            name, company, email
-        )
-        LOGGER.info("[Slack] 内容: %.100s...", inquiry)
+        if not self.enabled:
+            return
+        
+        try:
+            message = {
+                "attachments": [
+                    {
+                        "color": "#36a64f",  # 緑色
+                        "blocks": [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"📋 *FAQ選択*\n*ID:* {faq_id}\n*カテゴリー:* {category}\n*質問:* {question[:100]}{'...' if len(question) > 100 else ''}"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+            
+            await self._send_to_slack(message)
+            
+        except Exception as e:
+            LOGGER.error(f"❌ FAQ選択通知でエラー: {e}")
 
     async def notify_negative_feedback(self, feedback: Dict[str, str]) -> None:
         """ネガティブフィードバックの通知"""
-        LOGGER.info("[Slack] ⚠️  ネガティブフィードバック: %s", feedback)
+        LOGGER.info(f"[Slack] ⚠️ ネガティブフィードバック: {feedback}")
+        
+        if not self.enabled:
+            return
+        
+        try:
+            message = {
+                "attachments": [
+                    {
+                        "color": "#dc3545",  # 赤色
+                        "blocks": [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"⚠️ *ネガティブフィードバック*\n会話ID: {feedback.get('conversation_id', 'N/A')}\nコメント: {feedback.get('comment', 'なし')}"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+            
+            await self._send_to_slack(message)
+            
+        except Exception as e:
+            LOGGER.error(f"❌ ネガティブフィードバック通知でエラー: {e}")
+
+    async def notify_ai_service_status(self, service_name: str, status: str, details: Dict = None) -> None:
+        """AIサービス状態変更の通知"""
+        LOGGER.info(f"[Slack] 🤖 AIサービス状態: {service_name} - {status}")
+        
+        if not self.enabled:
+            return
+        
+        try:
+            color = "#28a745" if status == "RELOADED" else "#ffc107"
+            
+            message = {
+                "attachments": [
+                    {
+                        "color": color,
+                        "blocks": [
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": f"🤖 *AIサービス状態変更*\nサービス: {service_name}\nステータス: {status}\n詳細: {details if details else 'なし'}"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+            
+            await self._send_to_slack(message)
+            
+        except Exception as e:
+            LOGGER.error(f"❌ AIサービス状態通知でエラー: {e}")
+
+    def get_notification_stats(self) -> Dict[str, any]:
+        """通知統計を取得"""
+        return {
+            "enabled": self.enabled,
+            "webhook_configured": bool(self.webhook_url),
+            "total_notifications": self.notification_count,
+            "successful_notifications": self.successful_notifications,
+            "failed_notifications": self.failed_notifications,
+            "success_rate": round(self.successful_notifications / max(self.notification_count, 1) * 100, 1),
+            "last_notification_time": self.last_notification_time.isoformat() if self.last_notification_time else None
+        }
+
+    async def test_notification(self) -> bool:
+        """テスト通知を送信"""
+        if not self.enabled:
+            LOGGER.warning("Slack通知が無効のため、テスト通知を送信できません")
+            return False
+        
+        test_message = {
+            "attachments": [
+                {
+                    "color": "#36a64f",
+                    "blocks": [
+                        {
+                            "type": "header",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "🧪 テスト通知"
+                            }
+                        },
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": f"*PIP-Maker チャットボット*\nSlack通知機能のテストメッセージです。\n送信時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        return await self._send_to_slack(test_message)
 
 # フィードバックサービス
 class FeedbackService:
