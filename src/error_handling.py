@@ -52,12 +52,12 @@ class ConversationFlowException(ChatBotException):
         )
 
 class AIServiceException(ChatBotException):
-    """AI サービス関連例外（将来用）"""
-    def __init__(self, message: str, service_name: str = ""):
+    """AI サービス関連例外"""
+    def __init__(self, message: str, service_name: str = "openai", error_type: str = "general"):
         super().__init__(
             message=message,
             error_code="AI_SERVICE_ERROR",
-            details={"service": service_name}
+            details={"service": service_name, "error_type": error_type}
         )
 
 def log_error_with_context(
@@ -134,6 +134,24 @@ async def general_exception_handler(request: Request, exc: Exception) -> JSONRes
         fallback_message="予期しないエラーが発生しました。"
     )
     return JSONResponse(status_code=500, content=error_response)
+
+class VectorSearchException(ChatBotException):
+    """ベクトル検索関連例外"""
+    def __init__(self, message: str, collection_name: str = ""):
+        super().__init__(
+            message=message,
+            error_code="VECTOR_SEARCH_ERROR",
+            details={"collection": collection_name}
+        )
+
+class CategoryException(ChatBotException):
+    """カテゴリー処理関連例外"""
+    def __init__(self, message: str, category: str = "", operation: str = ""):
+        super().__init__(
+            message=message,
+            error_code="CATEGORY_ERROR",
+            details={"category": category, "operation": operation}
+        )
 
 # 使用例サンプル（参考用）
 """
