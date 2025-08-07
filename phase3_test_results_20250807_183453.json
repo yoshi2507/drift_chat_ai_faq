@@ -1,0 +1,90 @@
+{
+  "health": {
+    "success": true,
+    "citation_service_available": true,
+    "citation_stats": {
+      "total_cached_urls": 0,
+      "accessible_urls": 0,
+      "cache_hit_rate": 0.0,
+      "cache_duration_hours": 24.0
+    }
+  },
+  "debug": {
+    "success": false,
+    "status": 404
+  },
+  "searches": [
+    {
+      "success": true,
+      "query": "PIP-Makerとは何ですか？",
+      "category": "about",
+      "answer_length": 397,
+      "confidence": 0.8,
+      "method": "category_aware",
+      "citation_count": 4,
+      "total_sources": 4,
+      "verified_sources": 2,
+      "has_citations": true
+    },
+    {
+      "success": true,
+      "query": "PIP-Makerの機能を教えてください",
+      "category": "features",
+      "answer_length": 491,
+      "confidence": 0.6,
+      "method": "category_aware",
+      "citation_count": 5,
+      "total_sources": 7,
+      "verified_sources": 5,
+      "has_citations": true
+    },
+    {
+      "success": true,
+      "query": "PIP-Makerの導入事例はありますか？",
+      "category": "cases",
+      "answer_length": 461,
+      "confidence": 0.6,
+      "method": "category_aware",
+      "citation_count": 4,
+      "total_sources": 4,
+      "verified_sources": 2,
+      "has_citations": true
+    },
+    {
+      "success": true,
+      "query": "PIP-Makerの料金プランについて教えてください",
+      "category": "pricing",
+      "answer_length": 416,
+      "confidence": 0.6,
+      "method": "category_aware",
+      "citation_count": 5,
+      "total_sources": 6,
+      "verified_sources": 4,
+      "has_citations": true
+    },
+    {
+      "success": true,
+      "query": "PIP-Makerのサポート体制はどうなっていますか？",
+      "category": "other",
+      "answer_length": 404,
+      "confidence": 0.8,
+      "method": "category_aware",
+      "citation_count": 5,
+      "total_sources": 6,
+      "verified_sources": 4,
+      "has_citations": true
+    }
+  ],
+  "url_verification": {
+    "success": true,
+    "verified_count": 10,
+    "accessible_count": 7,
+    "success_rate": 70.0,
+    "cache_stats": {
+      "total_cached_urls": 20,
+      "accessible_urls": 13,
+      "cache_hit_rate": 65.0,
+      "cache_duration_hours": 24.0
+    }
+  }
+}

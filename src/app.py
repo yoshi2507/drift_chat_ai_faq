@@ -23,6 +23,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from .source_citation_service import SourceCitationService, SourceType, SourceCitation
 
 # エラーハンドリング
 from .error_handling import (
@@ -174,6 +175,10 @@ except ImportError as e:
     LOGGER.error(f"❌ ConversationFlowService import error: {e}")
     conversation_flow_service = None
 
+# Phase 3.1: 根拠URL表示サービス
+citation_service = SourceCitationService()
+LOGGER.info("✅ SourceCitationService initialized")
+
 # APIリクエスト/レスポンスモデル
 class CategorySelectionRequest(BaseModel):
     conversation_id: str
@@ -207,6 +212,12 @@ class SearchResponse(BaseModel):
     search_time: Optional[float] = None
     intent_confidence: Optional[float] = None
     method: str = "unknown"
+    
+    # === Phase 3.1: 新フィールド ===
+    citations: Optional[Dict[str, Any]] = None  # 引用情報
+    source_count: Optional[int] = None          # ソース数
+    verified_sources: Optional[int] = None      # 検証済みソース数
+
 
 class FeedbackRequest(BaseModel):
     conversation_id: str = Field(..., description="会話の一意識別子")
@@ -773,11 +784,17 @@ async def health() -> Dict[str, Any]:
         except Exception as e:
             health_info["ai_services"]["category_search"] = {"status": "error", "error": str(e)}
     
+    # Phase 3.1: 引用システム情報を追加
+    health_info["phase3_features"] = {
+        "citation_service": citation_service is not None,
+        "citation_stats": citation_service.get_citation_stats() if citation_service else None
+    }
+    
     return health_info
 
 @app.post("/api/search", response_model=SearchResponse)
 async def search_endpoint(query: SearchQuery) -> SearchResponse:
-    """検索エンドポイント（Phase 2: AI統合完全版）"""
+    """検索エンドポイント（Phase 3.1: 根拠URL表示機能統合版）"""
     
     # 入力バリデーション
     if not query.question:
@@ -792,20 +809,20 @@ async def search_endpoint(query: SearchQuery) -> SearchResponse:
     
     search_start_time = datetime.now()
     
-    # === Phase 2: AI統合検索パイプライン ===
+    # 検索実行（既存の検索ロジックは保持）
+    search_response = None
+    qa_results = []  # Q&Aデータを保存
     
-    # 1. AI統合カテゴリー対応検索（最優先）
+    # === AI統合検索 ===
     if category_search_engine and query.use_category_optimization:
         try:
             LOGGER.info(f"🤖 AI統合検索開始: {question_trimmed}")
             
-            # 会話コンテキストを構築
             conversation_context = {
                 "conversation_id": query.conversation_id,
                 "selected_category": query.category
             } if query.conversation_id else None
             
-            # AI統合検索を実行
             result = await category_search_engine.search_with_category_context(
                 query=question_trimmed,
                 selected_category=query.category,
@@ -813,11 +830,25 @@ async def search_endpoint(query: SearchQuery) -> SearchResponse:
                 use_ai_generation=query.use_ai_generation and bool(openai_service)
             )
             
-            # Phase 2 結果をSearchResponseに変換
+            # Q&Aデータを取得（引用用）
+            if hasattr(category_search_engine, 'get_source_qa_data'):
+                qa_results = await category_search_engine.get_source_qa_data(question_trimmed, query.category)
+            elif data_service:
+                try:
+                    all_qa_data = await data_service.get_qa_data()
+                    # 簡単なフィルタリング
+                    qa_results = [
+                        item for item in all_qa_data 
+                        if query.category is None or item.get('category', '').lower() == query.category.lower()
+                    ][:5]  # 最大5件
+                except Exception as e:
+                    LOGGER.warning(f"Q&Aデータ取得失敗: {e}")
+                    qa_results = []
+            
             search_response = SearchResponse(
                 answer=result['answer'],
                 confidence=result['confidence'],
-                source=result.get('sources_used', [None])[0],  # 最初のソース
+                source=result.get('sources_used', [None])[0],
                 question=question_trimmed,
                 response_type="ai_integrated",
                 category=result.get('category'),
@@ -829,32 +860,14 @@ async def search_endpoint(query: SearchQuery) -> SearchResponse:
                 method=result.get('method', 'ai_integrated')
             )
             
-            # Slack通知（AI情報付き）
-            try:
-                await slack_service.notify_chat_interaction(
-                    question=question_trimmed,
-                    answer=result['answer'],
-                    confidence=result['confidence'],
-                    interaction_type="ai_integrated_search",
-                    ai_generated=result.get('ai_generated', False),
-                    category=result.get('category', 'unknown'),
-                    sources_used=result.get('sources_used', [])
-                )
-            except Exception as slack_error:
-                LOGGER.warning(f"Slack通知失敗: {slack_error}")
-            
-            LOGGER.info(f"✅ AI統合検索成功: 信頼度={result['confidence']:.2f}, AI生成={result.get('ai_generated', False)}")
-            return search_response
+            LOGGER.info(f"✅ AI統合検索成功: 信頼度={result['confidence']:.2f}")
             
         except Exception as ai_error:
             LOGGER.warning(f"⚠️ AI統合検索失敗: {ai_error}")
-            
-            # フォールバック処理へ
-            if not basic_search_service:
-                raise SearchException("AI統合検索が失敗し、フォールバック検索も利用できません。")
+            search_response = None
     
-    # 2. 基本検索（フォールバック）
-    if basic_search_service:
+    # === 基本検索（フォールバック） ===
+    if not search_response and basic_search_service:
         try:
             LOGGER.info(f"📄 基本検索開始（フォールバック）: {question_trimmed}")
             
@@ -864,10 +877,21 @@ async def search_endpoint(query: SearchQuery) -> SearchResponse:
                 exclude_faqs=False
             )
             
-            # 検索時間を計算
+            # Q&Aデータを取得（引用用）
+            if data_service:
+                try:
+                    all_qa_data = await data_service.get_qa_data()
+                    qa_results = [
+                        item for item in all_qa_data 
+                        if question_trimmed.lower() in item.get('question', '').lower() or
+                        question_trimmed.lower() in item.get('answer', '').lower()
+                    ][:3]  # 最大3件
+                except Exception as e:
+                    LOGGER.warning(f"Q&Aデータ取得失敗: {e}")
+                    qa_results = []
+            
             search_time = (datetime.now() - search_start_time).total_seconds()
             
-            # SearchResponse形式に変換
             search_response = SearchResponse(
                 answer=result.answer,
                 confidence=result.confidence,
@@ -882,30 +906,68 @@ async def search_endpoint(query: SearchQuery) -> SearchResponse:
                 method="basic_fallback"
             )
             
-            # Slack通知
-            try:
-                await slack_service.notify_chat_interaction(
-                    question=question_trimmed,
-                    answer=result.answer,
-                    confidence=result.confidence,
-                    interaction_type="basic_search_fallback",
-                    ai_generated=False,
-                    category=query.category or "unknown"
-                )
-            except Exception as slack_error:
-                LOGGER.warning(f"Slack通知失敗: {slack_error}")
-            
             LOGGER.info(f"✅ 基本検索成功（フォールバック）: 信頼度={result.confidence:.2f}")
-            return search_response
             
-        except SearchException:
-            raise
         except Exception as exc:
             LOGGER.error(f"❌ 基本検索エラー: {exc}")
             raise SearchException("検索処理中にエラーが発生しました。") from exc
     
-    # 3. 全ての検索手段が失敗
-    raise SearchException("検索サービスが利用できません。システム管理者にお問い合わせください。")
+    if not search_response:
+        raise SearchException("検索サービスが利用できません。システム管理者にお問い合わせください。")
+    
+    # === Phase 3.1: 根拠URL表示機能の統合 ===
+    try:
+        LOGGER.info(f"📚 引用情報生成開始: {len(qa_results)}件のQ&Aデータ")
+        
+        # 包括的な引用情報を取得
+        citations = await citation_service.get_comprehensive_citations(
+            query=question_trimmed,
+            category=query.category or "unknown",
+            qa_results=qa_results
+        )
+        
+        # 検索結果に引用情報を追加
+        search_response.citations = citations
+        search_response.source_count = citations.get('total_sources', 0)
+        
+        # 検証済みソース数を計算
+        verified_count = 0
+        for citation in citations.get('citations', []):
+            if citation.get('verified'):
+                verified_count += 1
+        search_response.verified_sources = verified_count
+        
+        LOGGER.info(f"✅ 引用情報生成完了: {citations['total_sources']}件のソース、{verified_count}件検証済み")
+        
+    except Exception as citation_error:
+        LOGGER.warning(f"⚠️ 引用情報生成失敗: {citation_error}")
+        # 引用情報の生成に失敗しても検索結果は返す
+        search_response.citations = {
+            "citations": [],
+            "total_sources": 0,
+            "showing": 0,
+            "has_more": False
+        }
+        search_response.source_count = 0
+        search_response.verified_sources = 0
+    
+    # Slack通知（引用情報付き）
+    try:
+        citation_summary = f"引用: {search_response.source_count}件" if search_response.source_count else "引用なし"
+        
+        await slack_service.notify_chat_interaction(
+            question=question_trimmed,
+            answer=search_response.answer,
+            confidence=search_response.confidence,
+            interaction_type=search_response.method,
+            ai_generated=search_response.ai_generated,
+            category=search_response.category or "unknown",
+            sources_used=search_response.sources_used + [citation_summary]
+        )
+    except Exception as slack_error:
+        LOGGER.warning(f"Slack通知失敗: {slack_error}")
+    
+    return search_response
 
 @app.post("/api/feedback")
 async def feedback_endpoint(feedback: FeedbackRequest) -> Dict[str, str]:
@@ -1153,6 +1215,271 @@ async def debug_status() -> Dict[str, Any]:
             "src_directory_contents": list(os.listdir('./src')) if os.path.exists('./src') else "src directory not found"
         }
     }
+
+# === Phase 3.1: 引用システムデバッグエンドポイント ===
+
+@app.get("/debug/citations")
+async def debug_citations() -> Dict[str, Any]:
+    """引用システムのデバッグ情報"""
+    try:
+        stats = citation_service.get_citation_stats()
+        
+        # サンプル引用情報を生成
+        sample_qa = {
+            'question': 'PIP-Makerとは何ですか？',
+            'answer': 'PIP-Makerは効率的なソフトウェア開発を支援するツールです。',
+            'source': 'https://www.pip-maker.com/product 製品概要ページ',
+            'category': 'about'
+        }
+        
+        sample_citations = citation_service.extract_citations_from_qa_data(sample_qa)
+        sample_display = citation_service.format_citations_for_display(sample_citations)
+        
+        return {
+            "citation_service_stats": stats,
+            "sample_citation_extraction": {
+                "input": sample_qa,
+                "extracted_citations": [c.to_dict() for c in sample_citations],
+                "formatted_display": sample_display
+            },
+            "pip_maker_url_suggestions": [
+                c.to_dict() for c in citation_service.generate_pip_maker_related_urls(
+                    "PIP-Makerの機能について教えてください", "features"
+                )
+            ],
+            "system_info": {
+                "cache_enabled": True,
+                "cache_duration_hours": citation_service.cache_duration.total_seconds() / 3600,
+                "pip_maker_patterns": citation_service.pip_maker_patterns
+            }
+        }
+    except Exception as e:
+        return {
+            "error": str(e),
+            "citation_service_available": citation_service is not None
+        }
+
+@app.post("/admin/citations/verify-urls")
+async def verify_citations_urls() -> Dict[str, Any]:
+    """管理者用：キャッシュ済みURLの一括検証"""
+    try:
+        verified_results = []
+        
+        for url in list(citation_service.url_cache.keys())[:10]:  # 最大10件
+            is_accessible, status = await citation_service.verify_url_accessibility(url)
+            verified_results.append({
+                "url": url,
+                "accessible": is_accessible,
+                "status": status
+            })
+        
+        stats = citation_service.get_citation_stats()
+        
+        return {
+            "verification_results": verified_results,
+            "cache_stats": stats,
+            "message": f"{len(verified_results)}件のURLを検証しました"
+        }
+        
+    except Exception as e:
+        return {
+            "error": str(e),
+            "message": "URL検証中にエラーが発生しました"
+        }
+
+@app.get("/debug/citations/url-patterns")
+async def debug_citation_url_patterns() -> Dict[str, Any]:
+    """引用URLパターンのテスト"""
+    test_urls = [
+        "https://www.pip-maker.com/product",
+        "https://info.pip-maker.com/manual/pdf/PIP-Maker_creator.pdf",
+        "https://support.pip-maker.com/faq",
+        "https://blog.pip-maker.com/news/update",
+        "https://example.com/unknown"
+    ]
+    
+    pattern_results = []
+    for url in test_urls:
+        source_type = citation_service.classify_source_type(url)
+        pattern_results.append({
+            "url": url,
+            "classified_type": source_type.value,
+            "type_label": citation_service._get_source_type_label(source_type),
+            "icon": citation_service._get_source_icon(source_type)
+        })
+    
+    return {
+        "pip_maker_patterns": citation_service.pip_maker_patterns,
+        "pattern_test_results": pattern_results,
+        "source_type_mapping": {
+            "INTERNAL_DATA": "内部データ",
+            "OFFICIAL_WEBSITE": "公式サイト", 
+            "PDF_MANUAL": "PDFマニュアル",
+            "FAQ": "よくある質問",
+            "DOCUMENTATION": "ドキュメント",
+            "BLOG_POST": "ブログ記事",
+            "UNKNOWN": "参考資料"
+        }
+    }
+
+@app.post("/admin/citations/test-extraction")
+async def test_citation_extraction(qa_item: Dict[str, str]) -> Dict[str, Any]:
+    """管理者用：引用抽出テスト"""
+    try:
+        # 引用情報を抽出
+        citations = citation_service.extract_citations_from_qa_data(qa_item)
+        
+        # 表示用にフォーマット
+        formatted_display = citation_service.format_citations_for_display(citations)
+        
+        # URL検証（非同期）
+        enhanced_citations = await citation_service.enhance_citations_with_verification(citations)
+        
+        return {
+            "input_qa": qa_item,
+            "extracted_citations": [c.to_dict() for c in citations],
+            "enhanced_citations": [c.to_dict() for c in enhanced_citations],
+            "formatted_display": formatted_display,
+            "extraction_success": len(citations) > 0
+        }
+        
+    except Exception as e:
+        return {
+            "error": str(e),
+            "input_qa": qa_item
+        }
+
+@app.get("/debug/citations/cache-status")
+async def debug_citation_cache_status() -> Dict[str, Any]:
+    """引用システムのキャッシュ状態確認"""
+    cache_details = []
+    
+    for url, (accessible, timestamp) in citation_service.url_cache.items():
+        age_seconds = (datetime.now() - timestamp).total_seconds()
+        is_expired = age_seconds > citation_service.cache_duration.total_seconds()
+        
+        cache_details.append({
+            "url": url,
+            "accessible": accessible,
+            "cached_at": timestamp.isoformat(),
+            "age_seconds": age_seconds,
+            "age_hours": round(age_seconds / 3600, 2),
+            "is_expired": is_expired
+        })
+    
+    # 最新10件のみ表示
+    cache_details.sort(key=lambda x: x["cached_at"], reverse=True)
+    
+    stats = citation_service.get_citation_stats()
+    
+    return {
+        "cache_overview": stats,
+        "cache_duration_hours": citation_service.cache_duration.total_seconds() / 3600,
+        "recent_cached_urls": cache_details[:10],
+        "total_cached_urls": len(cache_details),
+        "expired_urls_count": len([c for c in cache_details if c["is_expired"]])
+    }
+
+@app.delete("/admin/citations/clear-cache")
+async def clear_citation_cache() -> Dict[str, Any]:
+    """管理者用：引用キャッシュのクリア"""
+    try:
+        original_cache_size = len(citation_service.url_cache)
+        citation_service.url_cache.clear()
+        
+        LOGGER.info(f"引用キャッシュをクリア: {original_cache_size}件のURLを削除")
+        
+        return {
+            "status": "success",
+            "message": f"{original_cache_size}件のキャッシュをクリアしました",
+            "cleared_count": original_cache_size,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        LOGGER.error(f"キャッシュクリアエラー: {e}")
+        return {
+            "status": "error",
+            "message": f"キャッシュクリアに失敗: {str(e)}"
+        }
+
+@app.post("/admin/citations/bulk-verify")
+async def bulk_verify_pip_maker_urls() -> Dict[str, Any]:
+    """管理者用：PIP-Maker関連URLの一括検証"""
+    pip_maker_urls = [
+        "https://www.pip-maker.com/",
+        "https://www.pip-maker.com/product",
+        "https://www.pip-maker.com/features", 
+        "https://www.pip-maker.com/pricing",
+        "https://www.pip-maker.com/case-studies",
+        "https://info.pip-maker.com/manual/pdf/PIP-Maker_creator.pdf",
+        "https://support.pip-maker.com/",
+        "https://blog.pip-maker.com/"
+    ]
+    
+    verification_results = []
+    successful_verifications = 0
+    
+    for url in pip_maker_urls:
+        try:
+            is_accessible, status = await citation_service.verify_url_accessibility(url)
+            
+            if is_accessible:
+                successful_verifications += 1
+            
+            verification_results.append({
+                "url": url,
+                "accessible": is_accessible,
+                "status": status,
+                "source_type": citation_service.classify_source_type(url).value
+            })
+            
+        except Exception as e:
+            verification_results.append({
+                "url": url,
+                "accessible": False,
+                "status": f"エラー: {str(e)}",
+                "source_type": "unknown"
+            })
+    
+    return {
+        "verification_summary": {
+            "total_urls": len(pip_maker_urls),
+            "successful_verifications": successful_verifications,
+            "success_rate": round(successful_verifications / len(pip_maker_urls) * 100, 1)
+        },
+        "verification_results": verification_results,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.post("/admin/citations/verify-urls")
+async def verify_citations_urls() -> Dict[str, Any]:
+    """管理者用：キャッシュ済みURLの一括検証"""
+    try:
+        verified_results = []
+        
+        for url in list(citation_service.url_cache.keys())[:10]:  # 最大10件
+            is_accessible, status = await citation_service.verify_url_accessibility(url)
+            verified_results.append({
+                "url": url,
+                "accessible": is_accessible,
+                "status": status
+            })
+        
+        stats = citation_service.get_citation_stats()
+        
+        return {
+            "verification_results": verified_results,
+            "cache_stats": stats,
+            "message": f"{len(verified_results)}件のURLを検証しました"
+        }
+        
+    except Exception as e:
+        return {
+            "error": str(e),
+            "message": "URL検証中にエラーが発生しました"
+        }
     
     # データサービスの詳細情報
     if data_service and hasattr(data_service, 'get_cache_info'):
@@ -1219,3 +1546,50 @@ static_paths_to_try = [
     project_root / "static",
     project_root / "src" / "static",
 ]
+
+# app.pyの最後に以下のコードを追加
+
+# 静的ファイル配信の設定
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+
+# 静的ファイルのパスを設定
+static_dir = Path(__file__).parent / "static"
+
+# 静的ファイルディレクトリが存在する場合のみマウント
+if static_dir.exists():
+    app.mount("/src/static", StaticFiles(directory=str(static_dir)), name="static")
+    LOGGER.info(f"✅ 静的ファイル配信を設定: {static_dir}")
+else:
+    LOGGER.warning(f"⚠️ 静的ファイルディレクトリが見つかりません: {static_dir}")
+
+# プロジェクトルートの静的ファイルも配信（index.htmlと同じ階層）
+project_root = Path(__file__).parent.parent
+if (project_root / "static").exists():
+    app.mount("/static", StaticFiles(directory=str(project_root / "static")), name="root_static")
+    LOGGER.info(f"✅ ルート静的ファイル配信を設定: {project_root / 'static'}")
+
+# 個別ファイルの配信（script.js, style.css）
+src_static_dir = Path(__file__).parent / "static"
+if src_static_dir.exists():
+    app.mount("/script.js", StaticFiles(directory=str(src_static_dir)), name="script")
+    app.mount("/style.css", StaticFiles(directory=str(src_static_dir)), name="style")
+
+# デバッグ用: 静的ファイルパスの確認
+@app.get("/debug/static-paths")
+async def debug_static_paths():
+    """静的ファイルパスのデバッグ情報"""
+    project_root = Path(__file__).parent.parent
+    src_static = Path(__file__).parent / "static"
+    
+    return {
+        "project_root": str(project_root),
+        "src_static_dir": str(src_static),
+        "src_static_exists": src_static.exists(),
+        "script_js_exists": (src_static / "script.js").exists(),
+        "style_css_exists": (src_static / "style.css").exists(),
+        "project_structure": {
+            "files_in_src": list(f.name for f in src_static.iterdir()) if src_static.exists() else [],
+            "files_in_root": list(f.name for f in project_root.iterdir() if f.is_file())
+        }
+    }
